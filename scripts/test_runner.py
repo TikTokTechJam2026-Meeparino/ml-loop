@@ -15,13 +15,34 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from agent.sandbox.runner import Runner
-from agent.sandbox.protocol import STARTER, load
+from agent.sandbox.protocol import STARTER, evaluate, load
 
 
 def fixture():
     return {name: [(date, str(i % 8), str(i % 13), str(i % 3), str(i % 2),
                     float(i % 23), int((i * 7 + i // 8) % 5 < 2)) for i in range(160)]
             for name, date in [('train', 20220408), ('valid', 20220422), ('test', 20220429)]}
+
+
+class ScoringTests(unittest.TestCase):
+    def test_numpy_and_python_inputs_agree_within_rounding(self):
+        # Unequal positive counts, tied scores, >5 impressions, and users
+        # with no positives/no negatives exercise the ranking conventions.
+        users = ['mixed'] * 7 + ['other'] * 3 + ['negative'] * 2 + ['positive'] * 2
+        labels = [1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1]
+        scores = [0, 1, 1, 3, 4, 5, 6, 2, 2, 1, 0, 0, 1, 1]
+        expected = evaluate(users, labels, scores)
+        for dtype in (np.float32, np.float64):
+            with self.subTest(dtype=dtype):
+                actual = evaluate(users, np.asarray(labels, dtype=dtype),
+                                  np.asarray(scores, dtype=dtype))
+                for key in ('GAUC', 'nDCG@5', 'primary'):
+                    self.assertAlmostEqual(float(actual[key]), expected[key], places=6)
+                for key in ('users', 'rows'):
+                    self.assertEqual(actual[key], expected[key])
+        self.assertEqual(expected['users'], 4)
+        self.assertEqual(expected['rows'], 14)
+        self.assertEqual(expected['primary'], (expected['GAUC'] + expected['nDCG@5']) / 2)
 
 
 class RunnerTests(unittest.TestCase):
@@ -67,8 +88,12 @@ class RunnerTests(unittest.TestCase):
                 expected = baseline.run_fm(self.splits, **self.config, verbose=False)
             finally:
                 sys.path.remove(str(STARTER))
+        # Preserve the supplied evaluator: FM uses float32 labels, whereas
+        # the runner uses integer labels, so accumulation can round differently.
         for key in ('GAUC', 'nDCG@5', 'primary'):
             self.assertAlmostEqual(result.scores[key], float(expected['valid'][key]), places=6)
+        self.assertEqual((result.metrics.val_gauc, result.metrics.val_ndcg, result.metrics.val_primary),
+                         (result.scores['GAUC'], result.scores['nDCG@5'], result.scores['primary']))
         np.testing.assert_array_equal(np.load(Path(result.artifact_dir) / 'predictions.npy'), captured[-2])
         before = Path(result.checkpoint_path).read_bytes()
         test = self.run_model(train=False, split='test', checkpoint_path=result.checkpoint_path)
