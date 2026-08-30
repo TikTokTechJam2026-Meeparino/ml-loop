@@ -1,4 +1,4 @@
-# Independent pipeline repository; managed by the agent.
+# Independent agent workspace; initialize from workspace_template/.
 /workspace/
 
 # Raw datasets and downloaded archives; keep the reference kit tracked.

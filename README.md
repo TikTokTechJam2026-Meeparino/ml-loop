@@ -120,4 +120,26 @@ The six-hour budget covers initialization, baseline training, search, repairs, a
 
 ## Getting started
 
+### Repository and workspace layout
+
+```text
+agent/                         # Tracked autonomous agent engine
+workspace_template/            # Tracked starting pipeline; currently empty stubs
+    features.py
+    model.py
+    train.py
+    evaluate.py
+workspace/                     # Ignored independent Git repository for experiments
+storage/                       # Persistent search memory outside the inner repository
+data/kuairand-pure/starter-kit/ # Tracked reference code and English documentation
+data/kuairand-pure/KuaiRand-Pure/data/ # Ignored raw dataset
+checkpoints/                   # Ignored generated weights and predictions
+```
+
+The outer repository versions the agent and starting template. The inner `workspace/` repository versions evolving candidate pipelines independently; it is not a submodule and its files are not tracked by the outer repository.
+
+The planned initializer copies `workspace_template/` into a new workspace, initializes its Git repository, and creates a genesis scaffold commit. That commit is not an evaluated search node until the baseline has run successfully. Subsequent runs resume the existing workspace without overwriting files or resetting its history. An existing directory that is not an initialized workspace must be reported rather than silently replaced. Template updates apply only to newly initialized workspaces.
+
+The template's `evaluate.py` is currently empty. Its eventual role is to call the fixed reference harness outside the editable workspace; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Initialization logic is not implemented yet.
+
 There is no runnable entry point yet. Installation instructions, dependency versions, dataset preparation commands, and launch examples will be added alongside the implementation. The first implementation milestone is a reproducible FM baseline with a frozen evaluation contract.
