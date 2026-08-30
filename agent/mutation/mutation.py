@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from agent.engine.parser import EditError, apply_edits
-from agent.engine.prompts import build_edit_messages
+from agent.mutation.parser import EditError, apply_edits
+from agent.mutation.prompts import build_edit_messages
 from agent.llm.client import LLMClient, LLMResponse
 
 
