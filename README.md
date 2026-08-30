@@ -106,6 +106,36 @@ files. Autonomous orchestration remains unwired. Run offline checks with
 
 ### Bounded self-repair
 
+`agent/recovery/` implements one bounded repair session per candidate. It calls
+the existing mutation engine with the original hypothesis, frozen constraints,
+and caller-redacted diagnostics. Each valid request consumes an attempt,
+including provider errors, invalid edits, and `NO_CHANGES`. Invalid caller inputs
+consume no attempt. Provider/edit errors propagate after a failed event is recorded.
+
+```python
+from agent.recovery import RecoveryEngine
+
+recovery = RecoveryEngine(mutation, max_attempts=3, history=node.recovery_events)
+proposal = recovery.propose(
+    files, hypothesis=hypothesis, diagnostics=redacted_diagnostics,
+    constraints=frozen_constraints,
+)
+if proposal is not None:
+    # The orchestrator writes proposal.files, runs validation, then reports:
+    recovery.record_result(succeeded=execution_and_evaluation_succeeded)
+node.recovery_events = recovery.events
+```
+
+The variables and execution step above are supplied by the caller. A pending
+proposal must be resolved before another request; successful repair closes the
+session. `RecoveryExhausted` signals that no more proposals are allowed. Each
+completed event retains that repair's diff and triggering diagnostics; token
+usage is unknown because mutation currently returns only files. Global deadlines,
+checkpoint compatibility, diagnostic redaction, and persistence remain caller
+responsibilities. Completed history can be restored; an interrupted pending
+proposal must be reconciled by the future orchestrator before resuming. Tests:
+`python -B scripts/test_recovery.py`.
+
 Runtime exceptions, tensor shape mismatches, and CUDA out-of-memory errors trigger a bounded repair loop. Repairs and their outcomes are logged, and retries consume the same wall-clock budget as the rest of the run.
 
 A candidate that exhausts its repair allowance is recorded as failed. Repair must not silently change frozen data splits, evaluation rules, or the primary target to obtain a passing run.
@@ -135,6 +165,16 @@ Each experiment should test one explicit hypothesis within a subsystem. Auxiliar
 The six-hour budget covers initialization, baseline training, search, repairs, and final inference. The scheduler must reserve time for final inference and artifact export, and enforce timeouts on running jobs rather than checking the deadline only between experiments. If the run cannot complete, it must report that limitation explicitly.
 
 ## Planned run artifacts
+
+`agent/reporting/` builds a deterministic JSON report with the genesis/selected
+validation comparison, parent-relative candidate results, failures, repairs,
+artifact references, stop reason, and separately supplied final test results.
+`build_report(tree, selected_node_id=..., stop_reason=..., artifacts=...,
+final_test=...)` does not select a pipeline or run inference. Optional
+`FinalTestResult` must refer to the selected node; omitted test results are marked
+`not_run`. `write_report(report, path)` exports JSON atomically. Artifact paths are
+indexed without copying or checking the files. Caller-supplied diagnostics must
+be redacted. Tests: `python -B scripts/test_reporting.py`.
 
 - A searchable experiment ledger and pipeline graph with commit references.
 - Per-candidate hypotheses, configurations, metrics, logs, and failure or repair histories.
