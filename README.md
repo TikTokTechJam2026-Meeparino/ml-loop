@@ -144,13 +144,11 @@ agent/
 │   ├── git_driver.py          # Inner repository lifecycle
 │   └── runner.py              # Training and evaluation subprocesses
 └── orchestrator.py            # Search loop and resource limits
-workspace_template/           # Tracked empty starting pipeline stubs
-├── data.py
-├── features.py
-├── model.py
-├── train.py
-├── evaluate.py
-└── submit.py
+workspace_template/           # Editable pipeline modules passed in LLM context
+├── features.py               # Feature extraction, item/user stats, embedding encoders
+├── model.py                  # Neural / tabular architecture (FM, DeepFM, DCN)
+├── train.py                  # Training loop, optimizer, loss, checkpoint saving
+└── config.py                 # Hyperparameters: learning rate, batch size, embedding dims
 workspace/                    # Ignored independent Git repo; same pipeline filenames
 storage/                      # Ignored persistent outputs; .gitkeep is tracked
 ├── state_tree.json
@@ -171,7 +169,7 @@ The outer repository versions the agent and starting template. The inner `worksp
 
 The driver uses the Git CLI through Python's `subprocess` module; Git must be installed and available on `PATH`, but GitPython is not required. It supports detached checkouts, branches rooted at explicit parent commits, UTF-8 source reads and atomic per-file writes, node commits, and unified diffs. Call `reset_hard()` and `clean_untracked()` explicitly before switching when edits should be discarded; ignored files are preserved by cleanup. Git failures propagate as `subprocess.CalledProcessError` with captured stderr. Run the isolated integration checks with `python scripts/test_git_driver.py`.
 
-The LLM client, mutation engine, and Git workspace driver are implemented; the remaining agent modules, pipeline template files, and root CLI are scaffolding. The template's `evaluate.py` and `submit.py` will integrate the fixed scoring and submission checks from the reference kit outside the editable workspace; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Runtime storage files are ignored by the outer repository and should be initialized by the agent when needed; the current local placeholders are empty, not valid serialized JSON state.
+The LLM client, mutation engine, and Git workspace driver are implemented; the remaining agent modules, pipeline template files, and root CLI are scaffolding. The editable template contains only `features.py`, `model.py`, `train.py`, and `config.py`, intended to be passed in LLM context. Fixed data splits, scoring, and submission checks belong outside the editable pipeline; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Runtime storage files are ignored by the outer repository and should be initialized by the agent when needed; the current local placeholders are empty, not valid serialized JSON state.
 
 The root research CLI is not runnable yet. A reproducible FM baseline with a frozen evaluation contract remains a pending implementation milestone.
 
