@@ -73,6 +73,30 @@ Search state, failure caches, and cross-branch insights persist outside candidat
 
 `prompt_summary(context)` selects up to six contextual insights with a 2,400-character cap, excludes other evaluation protocols, and deduplicates equivalent observations for the prompt without deleting evidence. Pass `max_tokens` and the target model's `token_counter` for a token cap on the complete summary. `save()` and `load()` use versioned `storage/global_insights.json` with atomic replacement and validation. Prompt assembly and recording remain explicit orchestrator responsibilities; they are not automatically wired into the mutation engine. Run offline checks with `python scripts/test_memory.py`.
 
+### Post-evaluation reflection
+
+`agent/graph/reflection.py` provides `ReflectionEngine`, separate from improvement
+selection and memory storage. After a candidate completes, the orchestrator may
+request a tentative interpretation of its hypothesis, diff, parent/child metrics,
+configuration context, repairs, and final failure diagnostics:
+
+```python
+from agent.graph.reflection import ReflectionEngine
+
+reflection = ReflectionEngine(client).reflect(node, parent, memory_context, stderr=redacted_stderr)
+memory.record(node, parent, memory_context, stderr=redacted_stderr, reflection=reflection)
+```
+
+Use empty stderr for evaluated candidates and redacted final stderr for failures
+after repair exhaustion. Reflection returns fewer than 20 words, or `None` when
+unavailable, declined, truncated, or malformed. Provider/configuration failures
+do not prevent recording the original outcome; invalid caller evidence raises
+before a model request. Record once after reflection, since memory rejects
+conflicting records for the same run/node. Reflection does not modify nodes or
+persistent memory. The orchestrator still owns significance thresholds,
+scheduling, redaction, context size, and run-wide time/token budgets; pruning
+alone is not a trigger. Tests: `python -B scripts/test_reflection.py`.
+
 ### Improvement selection
 
 `agent/improvement/` chooses one concrete change before code mutation. Categories
