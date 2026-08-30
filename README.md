@@ -6,7 +6,7 @@ Recommender Workshop is designed to explore, optimize, and evaluate deep ranking
 
 The goal is to automate the research loop—from feature engineering and model design to execution repair and final test inference—within a fixed experiment and time budget.
 
-> **Status: design stage.** This repository currently documents the intended architecture and evaluation protocol. The agent, training pipelines, and runnable commands are not implemented yet. No benchmark results are claimed.
+> **Status: early implementation.** The LLM client and its smoke-test script are implemented, and the reference starter kit is included. The autonomous search engine and evolving training pipeline remain scaffolding. No project benchmark results are claimed.
 
 ## Research objective
 
@@ -123,23 +123,86 @@ The six-hour budget covers initialization, baseline training, search, repairs, a
 ### Repository and workspace layout
 
 ```text
-agent/                         # Tracked autonomous agent engine
-workspace_template/            # Tracked starting pipeline; currently empty stubs
-    features.py
-    model.py
-    train.py
-    evaluate.py
-workspace/                     # Ignored independent Git repository for experiments
-storage/                       # Persistent search memory outside the inner repository
-data/kuairand-pure/starter-kit/ # Tracked reference code and English documentation
-data/kuairand-pure/KuaiRand-Pure/data/ # Ignored raw dataset
-checkpoints/                   # Ignored generated weights and predictions
+agent/
+├── __init__.py
+├── llm/
+│   ├── __init__.py
+│   ├── client.py              # LLM calls, token accounting, retries, model selection
+│   └── mock_client.py         # Mock responses for offline testing
+├── engine/
+│   ├── __init__.py
+│   ├── mutation.py            # Candidate diffs and bounded self-repair
+│   ├── parser.py              # Search/replace and unified diff parsing
+│   └── prompts.py             # Prompt templates and output format rules
+├── graph/
+│   ├── __init__.py
+│   ├── node.py                # SearchNode, EdgeAction, MetricResult
+│   ├── tree.py                # Selection, pruning, serialization
+│   └── memory.py              # Insights and dead-end tracking
+├── sandbox/
+│   ├── __init__.py
+│   ├── git_driver.py          # Inner repository lifecycle
+│   └── runner.py              # Training and evaluation subprocesses
+└── orchestrator.py            # Search loop and resource limits
+workspace_template/           # Tracked empty starting pipeline stubs
+├── data.py
+├── features.py
+├── model.py
+├── train.py
+├── evaluate.py
+└── submit.py
+workspace/                    # Ignored independent Git repo; same pipeline filenames
+storage/                      # Ignored persistent outputs; .gitkeep is tracked
+├── state_tree.json
+├── run_log.jsonl
+└── global_insights.json
+data/kuairand-pure/            # Existing data layout preserved
+├── starter-kit/              # Tracked fixed reference code and English README
+└── KuaiRand-Pure/data/        # Ignored raw dataset; currently empty
+checkpoints/                  # Ignored weights and predictions; .gitkeep is tracked
+requirements.txt              # LLM client dependencies
+main.py                       # Planned CLI entry point
+README.md
 ```
 
 The outer repository versions the agent and starting template. The inner `workspace/` repository versions evolving candidate pipelines independently; it is not a submodule and its files are not tracked by the outer repository.
 
 The planned initializer copies `workspace_template/` into a new workspace, initializes its Git repository, and creates a genesis scaffold commit. That commit is not an evaluated search node until the baseline has run successfully. Subsequent runs resume the existing workspace without overwriting files or resetting its history. An existing directory that is not an initialized workspace must be reported rather than silently replaced. Template updates apply only to newly initialized workspaces.
 
-The template's `evaluate.py` is currently empty. Its eventual role is to call the fixed reference harness outside the editable workspace; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Initialization logic is not implemented yet.
+Apart from `agent/llm/client.py`, agent modules, pipeline template files, and the root CLI are currently empty scaffolding. The template's `evaluate.py` and `submit.py` will integrate the fixed scoring and submission checks from the reference kit outside the editable workspace; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Initialization logic is not implemented yet. Runtime storage files are ignored by the outer repository and should be initialized by the agent when needed; the current local placeholders are empty, not valid serialized JSON state.
 
-There is no runnable entry point yet. Installation instructions, dependency versions, dataset preparation commands, and launch examples will be added alongside the implementation. The first implementation milestone is a reproducible FM baseline with a frozen evaluation contract.
+The root research CLI is not runnable yet. A reproducible FM baseline with a frozen evaluation contract remains a pending implementation milestone.
+
+### LLM client setup and smoke test
+
+Use Python 3.10 or newer for the client. Install dependencies from the project root:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+For a fresh clone, copy `.env.example` to `.env` (do not overwrite existing credentials). Set `LLM_MODEL` to your provider/model identifier and replace `<YOUR-API-KEY>` in `LLM_API_KEY`. Optionally set `LLM_API_BASE` for a custom endpoint. `.env` is Git-ignored. Existing process environment variables take precedence over the file. No default model is selected because the correct model and provider depend on your key.
+
+The client uses [LiteLLM's provider translation](https://docs.litellm.ai/docs/completion/input). Model identifiers use provider prefixes such as `anthropic/`, `gemini/`, `openrouter/`, `openai/`, or `ollama_chat/`. For local providers without authentication, leave the key blank. Providers using cloud credentials may require additional provider-specific environment configuration.
+
+```powershell
+# Offline tests: no dependencies, credentials, network requests, or token spend.
+python scripts/test_llm.py
+
+# Live smoke test: sends a small request using your .env settings; may incur charges.
+python scripts/test_llm.py --live
+```
+
+```python
+from agent.llm.client import LLMClient
+
+client = LLMClient.from_env()
+result = client.generate("Suggest one ranking experiment.", system="Be concise.")
+print(result.text)
+print(result.usage)
+print(client.total_usage)
+```
+
+`generate()` accepts a prompt; `complete()` accepts text chat messages. Both support a per-call model and output-token limit override. Create a separate client when changing provider credentials or endpoint. This initial interface is synchronous and text-only, without streaming or tool calls.
+
+The wrapper retries transient failures with bounded exponential backoff and jitter, but does not retry authentication or invalid-request failures. `LLM_MAX_RETRIES` counts retries after the first attempt; `LLM_TIMEOUT` is per attempt, not a global research deadline. The future orchestrator must enforce the overall run budget. Usage totals count returned provider-reported tokens only, not potentially billed failed requests; missing usage is explicitly represented by `None`. Raw provider exception messages are not included in wrapper errors.

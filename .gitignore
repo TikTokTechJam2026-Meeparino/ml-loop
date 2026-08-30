@@ -1,6 +1,10 @@
 # Independent agent workspace; initialize from workspace_template/.
 /workspace/
 
+# Persistent run outputs stay local across pipeline branch switches.
+/storage/*
+!/storage/.gitkeep
+
 # Raw datasets and downloaded archives; keep the reference kit tracked.
 /data/kuairand-pure/KuaiRand-Pure/
 /data/kuairand-pure/*.tar.gz
@@ -13,3 +17,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+
+# Local credentials; only the placeholder example is tracked.
+.env
+.env.*
+!.env.example
