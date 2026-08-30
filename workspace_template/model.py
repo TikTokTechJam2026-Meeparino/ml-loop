@@ -40,5 +40,8 @@ def load_predictor(checkpoint_path):
     Fail clearly if the file is missing, corrupt, or incompatible; do not fall
     back to random weights, retrain, or search other checkpoint paths.
     Loading must not create or modify any files, including caches or sidecars.
+    Restore config, features_state, and model_state from the checkpoint
+    dictionary (for example, one saved with torch.save). Report missing or
+    incompatible contents clearly. Use a format appropriate to the model.
     """
     raise NotImplementedError("Implement checkpoint loading for inference")

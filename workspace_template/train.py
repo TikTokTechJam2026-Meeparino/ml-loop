@@ -17,15 +17,31 @@ Responsibilities:
   needed to reproduce inference together in that single checkpoint file.
 - Keep any resumable training state consistent with its corresponding weights;
   if latest and best states differ, store both within the same checkpoint file.
+- Every successful run must produce a self-contained inference artifact,
+  whether training started fresh, warm-started, or resumed.
+- The runner should supply a fresh path for a new candidate by default. Parent
+  weights are an intentional warm start, recorded in checkpoint metadata;
+  exact resumption is for continuing the same candidate and training settings.
+- Save a single checkpoint dictionary (for example, with torch.save) containing
+  config, features_state, model_state, and any state needed to resume training.
+  Use a format appropriate to the model and shared with load_predictor.
 
 Constraints:
 - Fit model parameters on training data only; never tune against test scores.
 - Do not modify the fixed splits, target definition, or evaluation rules.
-- The supplied checkpoint file is the ONLY file execution may create or modify.
-  Do not write logs, predictions, sidecars, temporary files, caches, or additional
-  checkpoints; do not create directories. The caller prepares the parent folder.
-- Apply this write restriction to imported modules and ML libraries as well:
-  disable filesystem caches, Python bytecode writes, and automatic log writers.
+- The supplied path identifies the final self-contained checkpoint file, not a
+  directory. Temporary files needed for safe checkpoint saving are permitted.
+- Save periodically: write a complete payload to a uniquely named temporary
+  file in the checkpoint's directory, flush and close it, then atomically replace
+  the destination. Never truncate the last valid checkpoint before the new
+  payload is complete. Clean up owned temporary files on failure when possible.
+- Atomic replacement protects against ordinary process interruption during
+  saving; it does not guarantee durability across every storage or power failure.
+  Resume from the last completed save; work since that save may be lost.
+- The runner prepares the checkpoint's parent directory. Keep checkpoint writes
+  within it and do not modify source files, datasets, or unrelated artifacts.
+- Avoid unrelated file outputs and disable unnecessary library caches, Python
+  bytecode writes, and automatic log writers. Inference remains read-only.
 - Send diagnostics to stdout/stderr; the runner owns any log persistence.
 - Surface failures to the runner; do not fabricate metrics or hide exceptions.
 - Training logs are diagnostic; the runner independently verifies final scores.
