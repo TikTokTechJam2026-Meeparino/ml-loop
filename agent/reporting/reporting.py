@@ -112,6 +112,8 @@ def write_report(report: dict, path: str | Path) -> Path:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)

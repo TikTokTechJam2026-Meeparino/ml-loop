@@ -1,0 +1,331 @@
+"""Offline lifecycle tests using real Git and deterministic LLM/runner doubles."""
+
+from dataclasses import asdict
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agent.graph.node import MetricResult
+from agent.graph.tree import SearchConfig
+from agent.llm.client import LLMError, LLMResponse, TokenUsage
+from agent.llm.mock_client import MockLLMClient
+from agent.orchestrator import Orchestrator, RunConfig
+from agent.run_state import RunStore
+from agent.sandbox.runner import RunResult
+
+REAL_RUNNER = "--real-runner" in sys.argv
+if REAL_RUNNER:
+    sys.argv.remove("--real-runner")
+
+
+SPLITS = {"train": [[1, 1, 1, 1, 1, 1, 0]], "valid": [[2, 1, 1, 1, 1, 1, 1]],
+          "test": [[3, 1, 1, 1, 1, 1, 0]]}
+PROPOSAL = '{"requirement": "Increase capacity in model.py"}'
+
+
+def edit(old, new):
+    return f"FILE: model.py\n```python\n<<<<<<< SEARCH\n{old}\n=======\n{new}\n>>>>>>> REPLACE\n```"
+
+
+class FakeRunner:
+    def __init__(self, directory, outcomes):
+        self.storage_dir = Path(directory) / "executions"
+        self.outcomes = list(outcomes)
+        self.calls = []
+        self.interrupt_after = None
+
+    def run(self, workspace, **kwargs):
+        self.calls.append(kwargs)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        folder = self.storage_dir / kwargs["attempt_id"]
+        folder.mkdir(parents=True)
+        checkpoint = Path(kwargs["checkpoint_path"])
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text("checkpoint")
+        final = kwargs["split"] == "test"
+        result = RunResult("success" if outcome is not None else "failed", str(checkpoint), str(folder),
+            MetricResult(outcome, outcome, outcome, 1) if outcome is not None and not final else None,
+            {"GAUC": outcome, "nDCG@5": outcome, "primary": outcome} if outcome is not None else None,
+            1, "ValueError: shape mismatch" if outcome is None else None)
+        (folder / "result.json").write_text(json.dumps({**asdict(result), "split": kwargs["split"]}))
+        if self.interrupt_after == len(self.calls):
+            raise KeyboardInterrupt()
+        return result
+
+
+class OrchestratorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.run_dir = root / "run"
+        template = root / "template"
+        template.mkdir()
+        for name in ("config.py", "features.py", "train.py"):
+            (template / name).write_text("# placeholder\n")
+        (template / "model.py").write_text("dim=16\n")
+        (template / "requirements.txt").write_text("")
+        self.config = RunConfig(str(self.run_dir), template_dir=str(template),
+            search=SearchConfig(max_iterations=1), reflection_enabled=False)
+
+    def run_with(self, responses, outcomes):
+        client = MockLLMClient(responses)
+        runner = FakeRunner(self.run_dir, outcomes)
+        obj = Orchestrator(self.config, client=client, runner=runner, splits=SPLITS)
+        return obj, client, runner
+
+    def test_success_and_completed_resume_does_not_call_components(self):
+        obj, client, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, .6, .55])
+        report = obj.run()
+        self.assertEqual(report["selected_node_id"], "node_001")
+        self.assertAlmostEqual(report["validation_comparison"]["primary_gain"], .1)
+        self.assertEqual(report["final_test"]["scores"]["primary"], .55)
+        self.assertEqual([c["split"] for c in runner.calls], ["valid", "valid", "test"])
+        self.assertFalse(runner.calls[-1]["train"])
+        self.assertEqual(runner.calls[-1]["checkpoint_path"], runner.calls[1]["checkpoint_path"])
+        resumed = Orchestrator.resume(self.run_dir, client=client, runner=runner, splits=SPLITS)
+        self.assertEqual(resumed, report)
+        self.assertEqual(len(runner.calls), 3)
+        state, tree, memory = RunStore(self.run_dir).load()
+        self.assertEqual(state["stage"], "done")
+        self.assertEqual(tree.iteration_count, 1)
+        self.assertEqual(len(memory.insights), 1)
+
+    def test_repair_and_reflection_handoff(self):
+        from dataclasses import replace
+        self.config = replace(self.config, reflection_enabled=True)
+        obj, client, runner = self.run_with(
+            [PROPOSAL, edit("dim=16", "dim=32"), edit("dim=32", "dim=24"), "Capacity may help."],
+            [.5, None, .6, .57])
+        obj.run()
+        _, tree, memory = RunStore(self.run_dir).load()
+        event = tree.nodes["node_001"].recovery_events[0]
+        self.assertTrue(event.succeeded)
+        self.assertIn("+dim=24", event.raw_diff)
+        self.assertEqual(memory.insights[0].reflection, "Capacity may help.")
+        self.assertNotEqual(runner.calls[1]["checkpoint_path"], runner.calls[2]["checkpoint_path"])
+
+    def test_checkpoint_reasons_and_response_metadata_without_content(self):
+        obj, client, runner = self.run_with(
+            [LLMResponse(PROPOSAL, "mock", TokenUsage(20, 5, 25), "stop", 1),
+             edit("dim=16", "dim=32")], [.5, .6, .55])
+        obj.run()
+        log = (self.run_dir / "events.jsonl").read_text()
+        saved = [json.loads(line)["data"] for line in log.splitlines()
+                 if json.loads(line)["event"] == "stage.saved"]
+        self.assertTrue(all(event["reason"] for event in saved))
+        self.assertTrue({"stage_entered", "attempt_reserved", "model_request_started",
+                         "model_response_received", "candidate_committed", "execution_scheduled"}
+                        <= {event["reason"] for event in saved})
+        requests = [event for event in saved if event["reason"] == "model_request_started"]
+        responses = [event for event in saved if event["reason"] == "model_response_received"]
+        self.assertEqual([event["call_id"] for event in requests], [1, 2])
+        self.assertEqual([event["call_id"] for event in responses], [1, 2])
+        self.assertEqual([event["attempt"] for event in requests], [1, 1])
+        self.assertEqual(responses[0]["token_usage"], {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25})
+        self.assertIsNone(responses[1]["token_usage"])
+        self.assertEqual(responses[0]["finish_reason"], "stop")
+        self.assertTrue(all(event["elapsed_s"] >= 0 for event in responses))
+        self.assertNotIn("Increase capacity", log)
+        self.assertNotIn("dim=32", log)
+
+    def test_rejected_output_logs_response_and_retry_attempts(self):
+        obj, _, _ = self.run_with([
+            LLMResponse("private-response", "mock", None, "length", 1), PROPOSAL, "NO_CHANGES"], [.5, .4])
+        obj.run()
+        log = (self.run_dir / "events.jsonl").read_text()
+        saved = [json.loads(line)["data"] for line in log.splitlines()
+                 if json.loads(line)["event"] == "stage.saved"]
+        responses = [event for event in saved if event["reason"] == "model_response_received"]
+        self.assertEqual(responses[0]["finish_reason"], "length")
+        self.assertEqual([event["attempt"] for event in responses], [1, 2, 1])
+        self.assertNotIn("private-response", log)
+
+    def test_no_change_and_invalid_proposals_count_without_training(self):
+        for responses in ([PROPOSAL, "NO_CHANGES"], ["invalid", "invalid"]):
+            with self.subTest(responses=responses):
+                from dataclasses import replace
+                self.config = replace(self.config, run_dir=str(self.run_dir / str(len(responses[0]))))
+                obj, _, runner = self.run_with(responses, [.5, .4])
+                report = obj.run()
+                self.assertEqual(report["candidate_status_counts"], {"failed": 1})
+                self.assertEqual(report["selected_node_id"], "genesis")
+                self.assertEqual(len(runner.calls), 2)
+
+    def test_completed_evaluation_recovered_without_retraining(self):
+        obj, client, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, .6, .55])
+        runner.interrupt_after = 2
+        with self.assertRaises(KeyboardInterrupt):
+            obj.run()
+        runner.interrupt_after = None
+        report = Orchestrator.resume(self.run_dir, client=client, runner=runner, splits=SPLITS)
+        self.assertEqual(report["completed_iterations"], 1)
+        self.assertEqual(len(runner.calls), 3)
+
+    def test_interrupted_final_test_is_not_repeated(self):
+        obj, client, runner = self.run_with([PROPOSAL, "NO_CHANGES"], [.5, .4])
+        runner.interrupt_after = 2
+        with self.assertRaises(KeyboardInterrupt):
+            obj.run()
+        runner.interrupt_after = None
+        report = Orchestrator.resume(self.run_dir, client=client, runner=runner, splits=SPLITS)
+        self.assertEqual(report["final_test"]["status"], "success")
+        self.assertEqual(len(runner.calls), 2)
+
+    def test_provider_failure_pauses_without_failed_experiment(self):
+        obj, _, runner = self.run_with([LLMError("secret-provider-error")], [.5, .4])
+        with self.assertRaises(LLMError):
+            obj.run()
+        state, tree, memory = RunStore(self.run_dir).load()
+        self.assertEqual(tree.iteration_count, 0)
+        self.assertEqual(len(memory.insights), 0)
+        self.assertEqual(state["paused_error"], "LLMError")
+        Orchestrator.resume(self.run_dir, client=MockLLMClient([PROPOSAL, "NO_CHANGES"]),
+                            runner=runner, splits=SPLITS)
+
+    def test_genesis_failure_reports_without_search(self):
+        obj, client, runner = self.run_with([], [None])
+        report = obj.run()
+        self.assertEqual(report["stop_reason"], "genesis_failed")
+        self.assertEqual(client.requests, [])
+
+    def test_budget_reserve_skips_search_but_allows_final_test(self):
+        obj, client, runner = self.run_with([], [.5, .4])
+        original = obj._search
+        def stop_search():
+            obj.budget.deadline = __import__("time").time() + 60
+            original()
+        obj._search = stop_search
+        report = obj.run()
+        self.assertEqual(report["stop_reason"], "time_budget")
+        self.assertEqual(report["final_test"]["status"], "success")
+        self.assertEqual(client.requests, [])
+
+    def test_resume_rejects_changed_dataset(self):
+        obj, _, runner = self.run_with([LLMError("pause")], [.5])
+        with self.assertRaises(LLMError):
+            obj.run()
+        with self.assertRaises(ValueError):
+            Orchestrator.resume(self.run_dir, client=MockLLMClient([]), runner=runner,
+                                splits={**SPLITS, "test": []})
+
+    def test_model_call_budget_finishes_active_attempt(self):
+        from dataclasses import replace
+        self.config = replace(self.config, max_llm_calls=1)
+        obj, client, runner = self.run_with([PROPOSAL], [.5, .4])
+        report = obj.run()
+        self.assertEqual(report["stop_reason"], "model_call_budget")
+        self.assertEqual(report["completed_iterations"], 1)
+        self.assertEqual(len(client.requests), 1)
+
+    def test_repair_exhaustion_and_final_test_failure(self):
+        from dataclasses import replace
+        self.config = replace(self.config, max_repairs=1)
+        obj, _, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32"), "NO_CHANGES"],
+                                       [.5, None, None])
+        report = obj.run()
+        self.assertEqual(report["selected_node_id"], "genesis")
+        self.assertEqual(report["candidate_status_counts"], {"failed": 1})
+        self.assertEqual(report["final_test"]["status"], "failed")
+
+    def test_multiple_generations_pass_lineage_and_memory(self):
+        from dataclasses import replace
+        self.config = replace(self.config, search=SearchConfig(max_iterations=2, max_children=1))
+        obj, client, runner = self.run_with(
+            [PROPOSAL, edit("dim=16", "dim=32"), PROPOSAL, edit("dim=32", "dim=64")],
+            [.5, .6, .65, .61])
+        report = obj.run()
+        _, tree, memory = RunStore(self.run_dir).load()
+        self.assertEqual(tree.nodes["node_002"].parent_id, "node_001")
+        self.assertEqual(report["selected_node_id"], "node_002")
+        self.assertEqual(len(memory.insights), 2)
+        prompt = client.requests[2].messages[1]["content"]
+        self.assertIn("dim=32", prompt)
+        self.assertIn("0.6", prompt)
+
+    def test_checkpoint_drift_prevents_test_inference(self):
+        obj, client, runner = self.run_with([PROPOSAL, "NO_CHANGES"], [.5])
+        original = obj._final_execute
+        def corrupt_checkpoint():
+            Path(obj.state["artifacts"]["genesis"]["checkpoint"]).write_text("corrupted")
+            original()
+        obj._final_execute = corrupt_checkpoint
+        with self.assertRaises(ValueError):
+            obj.run()
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_exact_reflection_threshold_does_not_trigger(self):
+        from dataclasses import replace
+        self.config = replace(self.config, reflection_enabled=True)
+        obj, client, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, .51, .5])
+        obj.run()
+        self.assertEqual(len(client.requests), 2)
+
+    def test_expired_final_budget_is_reported(self):
+        obj, client, runner = self.run_with([PROPOSAL, "NO_CHANGES"], [.5])
+        original = obj._final_execute
+        def expired():
+            obj.budget.deadline = 0
+            original()
+        obj._final_execute = expired
+        report = obj.run()
+        self.assertEqual(report["final_test"]["status"], "not_run")
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_infrastructure_result_pauses_without_tree_penalty(self):
+        from dataclasses import replace
+        obj, client, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, None])
+        original = runner.run
+        def infrastructure(workspace, **kwargs):
+            result = original(workspace, **kwargs)
+            if len(runner.calls) == 2:
+                result = replace(result, failure_kind="infrastructure")
+            return result
+        runner.run = infrastructure
+        with self.assertRaises(RuntimeError):
+            obj.run()
+        _, tree, memory = RunStore(self.run_dir).load()
+        self.assertEqual(tree.iteration_count, 0)
+        self.assertEqual(len(memory.insights), 0)
+
+    def test_resume_between_tree_completion_and_memory_records_once(self):
+        obj, client, runner = self.run_with([PROPOSAL, "NO_CHANGES"], [.5, .4])
+        original = obj._stage
+        def interrupt(stage):
+            original(stage)
+            if stage == "reflect":
+                raise KeyboardInterrupt()
+        obj._stage = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            obj.run()
+        report = Orchestrator.resume(self.run_dir, client=client, runner=runner, splits=SPLITS)
+        _, tree, memory = RunStore(self.run_dir).load()
+        self.assertEqual(report["completed_iterations"], 1)
+        self.assertEqual(len(memory.insights), 1)
+
+    @unittest.skipUnless(REAL_RUNNER, "pass --real-runner to execute real training")
+    def test_real_runner_with_mocked_model(self):
+        from dataclasses import replace
+        from test_runner import fixture
+        from agent.orchestrator import ROOT
+        config = replace(self.config, template_dir=str(ROOT / "workspace_template"))
+        edit_config = ('FILE: config.py\n```python\n<<<<<<< SEARCH\n'
+                       'DEFAULTS = dict(k=16, lr=0.001, l2=1e-6, epochs=40, bs=8192, patience=4, seed=0)\n'
+                       '=======\n'
+                       'DEFAULTS = dict(k=16, lr=0.002, l2=1e-6, epochs=40, bs=8192, patience=4, seed=0)\n'
+                       '>>>>>>> REPLACE\n```')
+        client = MockLLMClient(['{"requirement":"Increase lr to 0.002 in config.py"}', edit_config])
+        report = Orchestrator(config, client=client, splits=fixture()).run()
+        self.assertEqual(report["final_test"]["status"], "success")
+        self.assertEqual(report["completed_iterations"], 1)
+        self.assertEqual(report["candidate_status_counts"].get("failed", 0), 0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -82,7 +82,7 @@ class MutationTests(unittest.TestCase):
             engine = CodeMutationEngine()
             engine.mutate("Keep", {"a.py": "one"})
             engine.mutate("Keep", {"a.py": "one"})
-            factory.assert_called_once_with()
+            factory.assert_called_once_with(profile="low")
 
 
 if __name__ == "__main__":

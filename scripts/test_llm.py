@@ -45,6 +45,15 @@ class ClientTests(unittest.TestCase):
         transport = Mock(side_effect=[TimeoutError(), response()])
         self.assertEqual(self.client(transport).complete([{"role": "user", "content": "Hello"}]).attempts, 2)
 
+    def test_reasoning_effort_is_opt_in(self):
+        transport = Mock(return_value=response())
+        self.client(transport).complete([{"role": "user", "content": "Hello"}])
+        self.assertNotIn("reasoning_effort", transport.call_args.kwargs)
+        self.client(transport, reasoning_effort="low").complete([{"role": "user", "content": "Hello"}])
+        self.assertEqual(transport.call_args.kwargs["reasoning_effort"], "low")
+        with self.assertRaises(ValueError):
+            LLMConfig(model="test/model", reasoning_effort="invalid")
+
     def test_retry_exhaustion(self):
         transport = Mock(side_effect=TimeoutError("secret"))
         with self.assertRaises(LLMError):

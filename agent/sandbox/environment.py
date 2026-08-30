@@ -71,16 +71,21 @@ class EnvironmentManager:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('candidate budget exhausted during environment preparation')
+        self.logger.emit('command.started', component='environment', run_id=Path(artifacts).name, command=command,
+                         timeout_s=remaining, artifact_dir=str(artifacts))
         with (artifacts / 'environment.stderr.log').open('ab') as stderr:
             try:
                 result = subprocess.run(command, env=clean_environment(), cwd=artifacts,
                     stdout=subprocess.PIPE, stderr=stderr, timeout=remaining, check=True)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                self.logger.exception('command.failed', exc, component='environment', run_id=Path(artifacts).name, artifact_dir=str(artifacts))
                 with (artifacts / 'environment.stdout.log').open('ab') as stdout:
                     stdout.write(exc.stdout or b'')
                 raise
         with (artifacts / 'environment.stdout.log').open('ab') as stdout:
             stdout.write(result.stdout)
+        self.logger.emit('command.finished', component='environment', run_id=Path(artifacts).name, returncode=result.returncode,
+                         artifact_dir=str(artifacts))
         return result.stdout.decode('utf-8')
 
     def prepare(self, workspace, artifacts, deadline, run_id=None):

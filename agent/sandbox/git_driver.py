@@ -111,6 +111,7 @@ class GitDriver:
         # Keep commits usable in clean machines/CI without changing global config.
         self._git("config", "user.name", "ML Loop")
         self._git("config", "user.email", "ml-loop@localhost")
+        self._git("config", "core.autocrlf", "false")
         self._git("add", "-A")
         self._git("commit", "--allow-empty", "-m", "node_00: genesis")
         return self._commit_sha("HEAD")
@@ -174,3 +175,24 @@ class GitDriver:
         """Return the unified diff between two commits."""
         return self._git("diff", "--no-ext-diff", "--no-color",
                          self._commit_sha(parent_sha), self._commit_sha(child_sha), "--")
+
+    def current_commit(self) -> str:
+        return self._commit_sha("HEAD")
+
+    def restore(self, commit_sha: str) -> None:
+        """Restore an owned candidate workspace, discarding interrupted edits."""
+        self.reset_hard()
+        self.clean_untracked()
+        self.checkout_commit(commit_sha)
+
+    def ensure_branch(self, parent_sha: str, branch: str) -> None:
+        """Create or revisit a candidate branch, restoring its parent first."""
+        self.restore(parent_sha)
+        self._git("check-ref-format", "--branch", branch)
+        self._git("checkout", "-B", branch, self._commit_sha(parent_sha))
+
+    def commit_if_changed(self, node_id: str, message: str) -> str:
+        """Idempotently pin a prepared candidate snapshot before execution."""
+        if not self._git("status", "--porcelain").strip():
+            return self.current_commit()
+        return self.commit_node(node_id, message)

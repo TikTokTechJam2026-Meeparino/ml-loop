@@ -90,7 +90,7 @@ class ReflectionTests(unittest.TestCase):
             engine = ReflectionEngine()
             for _ in range(2):
                 engine.reflect(self.node, self.parent, self.context)
-            factory.assert_called_once_with()
+            factory.assert_called_once_with(profile="low")
         with patch("agent.graph.reflection.LLMClient.from_env", side_effect=LLMError("unavailable")):
             self.assertIsNone(ReflectionEngine().reflect(self.node, self.parent, self.context))
         with patch("agent.graph.reflection.LLMClient.from_env", side_effect=ValueError("invalid config")):

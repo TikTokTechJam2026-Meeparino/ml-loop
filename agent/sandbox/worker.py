@@ -26,4 +26,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    from agent.sandbox.lease import file_lease
+    with file_lease(Path(sys.argv[4]).parent / 'worker.lock'):
+        main()

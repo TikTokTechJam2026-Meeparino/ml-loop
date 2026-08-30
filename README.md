@@ -6,7 +6,7 @@ Recommender Workshop is designed to explore, optimize, and evaluate deep ranking
 
 The goal is to automate the research loop—from feature engineering and model design to execution repair and final test inference—within a fixed experiment and time budget.
 
-> **Status: partial implementation.** The FM workspace, subprocess runner, independent evaluation, and checkpoint recovery are implemented alongside the LLM, mutation, graph, memory, and Git components. The autonomous orchestration loop remains scaffolding. The starter-kit evaluation protocol has not been independently verified against an official benchmark.
+> **Status: integrated implementation.** The sequential orchestrator connects proposal, mutation, execution, repair, tree search, memory, reflection, and reporting. Offline lifecycle tests and a real-training smoke test with mocked model responses pass. A full-budget live-model search and independent verification of the starter-kit benchmark protocol remain outstanding.
 
 ## Research objective
 
@@ -69,7 +69,7 @@ Each candidate transformation runs on an ephemeral branch in an isolated workspa
 
 Search state, failure caches, and cross-branch insights persist outside candidate workspaces. Hypothesis records should include their configuration and data context so that the agent can avoid repeating refuted experiments without incorrectly rejecting a hypothesis under materially different conditions.
 
-`ExplorationMemory` in `agent/graph/memory.py` records terminal outcomes through `record(node, parent, context, stderr=..., reflection=...)`. Supply a `MemoryContext` with run ID, evaluation protocol ID, subsystem, and relevant configuration/shapes/seeds. Numeric gains and losses are relative to the parent; neutral results are retained, and pruning status does not determine whether an experiment improved. Terminal failures require an error signature and the final ten stderr lines. All terminal outcomes can carry optional reflections under 20 words, labelled as model interpretations without replacing numeric or error evidence. Memory never calls an LLM or applies reflection thresholds. The future orchestrator should gate reflection on significant parent-relative gains/losses or failures after repair exhaustion, subject to remaining budgets; pruning alone is not a trigger. Routine iterations need only numeric summaries. Diagnostic text should be redacted before it is supplied to memory or an LLM.
+`ExplorationMemory` in `agent/graph/memory.py` records terminal outcomes through `record(node, parent, context, stderr=..., reflection=...)`. Supply a `MemoryContext` with run ID, evaluation protocol ID, subsystem, and relevant configuration/shapes/seeds. Numeric gains and losses are relative to the parent; neutral results are retained, and pruning status does not determine whether an experiment improved. Terminal failures require an error signature and the final ten stderr lines. All terminal outcomes can carry optional reflections under 20 words, labelled as model interpretations without replacing numeric or error evidence. Memory never calls an LLM or applies reflection thresholds. The orchestrator gates reflection on significant parent-relative gains/losses or terminal failures, subject to remaining budgets; pruning alone is not a trigger. Routine iterations need only numeric summaries. Diagnostic text is bounded and redacted before it is supplied to memory or an LLM.
 
 `prompt_summary(context)` selects up to six contextual insights with a 2,400-character cap, excludes other evaluation protocols, and deduplicates equivalent observations for the prompt without deleting evidence. Pass `max_tokens` and the target model's `token_counter` for a token cap on the complete summary. `save()` and `load()` use versioned `storage/global_insights.json` with atomic replacement and validation. Prompt assembly and recording remain explicit orchestrator responsibilities; they are not automatically wired into the mutation engine. Run offline checks with `python scripts/test_memory.py`.
 
@@ -125,7 +125,7 @@ correspondence, context size, redaction, and budget enforcement. Proposal output
 is validated structurally; its scientific merit and compliance still require
 review/evaluation by the execution layer. Caller constraints are preserved in
 the returned requirement. Neither proposal nor mutation executes code or writes
-files. Autonomous orchestration remains unwired. Run offline checks with
+files. The orchestrator connects these stages. Run offline checks with
 `python -B scripts/test_improvement.py`.
 
 ### Bounded self-repair
@@ -157,7 +157,7 @@ completed event retains that repair's diff and triggering diagnostics; token
 usage is unknown because mutation currently returns only files. Global deadlines,
 checkpoint compatibility, diagnostic redaction, and persistence remain caller
 responsibilities. Completed history can be restored; an interrupted pending
-proposal must be reconciled by the future orchestrator before resuming. Tests:
+proposal is reconciled by the orchestrator before resuming. Tests:
 `python -B scripts/test_recovery.py`.
 
 Runtime exceptions, tensor shape mismatches, and CUDA out-of-memory errors trigger a bounded repair loop. Repairs and their outcomes are logged, and retries consume the same wall-clock budget as the rest of the run.
@@ -188,7 +188,7 @@ Each experiment should test one explicit hypothesis within a subsystem. Auxiliar
 
 The six-hour budget covers initialization, baseline training, search, repairs, and final inference. The scheduler must reserve time for final inference and artifact export, and enforce timeouts on running jobs rather than checking the deadline only between experiments. If the run cannot complete, it must report that limitation explicitly.
 
-## Planned run artifacts
+## Run artifacts
 
 `agent/reporting/` builds a deterministic JSON report with the genesis/selected
 validation comparison, parent-relative candidate results, failures, repairs,
@@ -210,11 +210,11 @@ be redacted. Tests: `python -B scripts/test_reporting.py`.
 
 - [ ] Specify and validate the KuaiRand-Pure data and metric contract.
 - [x] Implement the fixed FM baseline and reproducible evaluation harness.
-- [ ] Add the experiment ledger, pipeline graph, and Git workspace lifecycle.
-- [ ] Implement parent selection, hypothesis generation, backtracking, and pruning.
-- [ ] Add bounded execution repair, failure caching, and resource enforcement.
+- [x] Add the experiment ledger, pipeline graph, and Git workspace lifecycle.
+- [x] Implement parent selection, hypothesis generation, backtracking, and pruning.
+- [x] Add bounded execution repair, failure evidence, and deadline checks.
 - [ ] Integrate feature, backbone, multi-task, and loss transformations.
-- [ ] Implement convergence checks, final selection, test inference, and reporting.
+- [x] Implement convergence checks, final selection, test inference, and reporting.
 - [ ] Validate a complete autonomous run under the 50-iteration and six-hour limits.
 
 ## Getting started
@@ -225,26 +225,33 @@ be redacted. Tests: `python -B scripts/test_reporting.py`.
 agent/
 ├── __init__.py
 ├── log.py                    # Shared structured storage/run_log.jsonl event logger
+├── budget.py                 # Shared deadline, final reserve, bounded model calls
+├── run_state.py              # Atomic checkpoint generations and process ownership
 ├── llm/
 │   ├── __init__.py
 │   ├── client.py              # LLM calls, token accounting, retries, model selection
 │   └── mock_client.py         # Mock responses for offline testing
-├── engine/
+├── improvement/              # Select the next experiment from code and evidence
+├── recovery/                 # Bounded repairs to the same hypothesis
+├── reporting/                # Final JSON report and artifact index
+├── mutation/
 │   ├── __init__.py
-│   ├── mutation.py            # Candidate diffs and bounded self-repair
-│   ├── parser.py              # Search/replace and unified diff parsing
+│   ├── mutation.py            # Implement a supplied requirement
+│   ├── parser.py              # Exact search/replace parsing
 │   └── prompts.py             # Prompt templates and output format rules
 ├── graph/
 │   ├── __init__.py
 │   ├── node.py                # SearchNode, EdgeAction, MetricResult
 │   ├── tree.py                # Selection, pruning, serialization
-│   └── memory.py              # Insights and dead-end tracking
+│   ├── memory.py              # Contextual experiment evidence
+│   └── reflection.py          # Optional post-evaluation interpretation
 ├── sandbox/
 │   ├── __init__.py
 │   ├── git_driver.py          # Inner repository lifecycle
 │   ├── environment.py         # Candidate dependency environments and cache
 │   ├── protocol.py            # Fixed data loader and evaluator access
 │   ├── worker.py              # Isolated candidate entry point
+│   ├── lease.py               # Process-held execution leases
 │   └── runner.py              # Training and evaluation subprocesses
 └── orchestrator.py            # Search loop and resource limits
 workspace_template/           # Editable pipeline modules passed in LLM context
@@ -263,7 +270,7 @@ data/kuairand-pure/            # Existing data layout preserved
 └── KuaiRand-Pure/data/        # Ignored raw dataset; download separately below
 checkpoints/                  # Ignored weights and predictions; .gitkeep is tracked
 requirements.txt              # Agent/runner dependencies, not the candidate environment
-main.py                       # Planned CLI entry point
+main.py                       # Launch/resume CLI entry point
 README.md
 ```
 
@@ -275,7 +282,140 @@ The driver uses the Git CLI through Python's `subprocess` module; Git must be in
 
 The editable template contains `features.py`, `model.py`, `train.py`, `config.py`, and `requirements.txt`, intended to be passed in LLM context together. They implement the reference FM and declare its dependencies. The module specifications are authoritative; implementations and dependency choices are replaceable. Fixed data loading and scoring are accessed through `agent/sandbox/protocol.py`, outside the editable pipeline; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, virtualenv, or Git metadata. Runtime storage files are ignored by the outer repository.
 
-The root research CLI is not runnable yet. The runner can be invoked independently as described below.
+### Launch or resume a search
+
+Install the root dependencies and configure the LLM as described below. Live
+search calls the configured provider and may incur charges. Use a new, dedicated
+run directory; the orchestrator owns its candidate workspace and may discard
+uncommitted edits there when restoring saved stages.
+
+```powershell
+python -B main.py --run-dir storage/search-001 --data-dir data/kuairand-pure/KuaiRand-Pure/data
+python -B main.py --run-dir storage/search-001 --resume
+```
+
+Optional `--config path/to/run.json` accepts `RunConfig` fields for new runs:
+
+```json
+{
+  "search": {"max_iterations": 5, "max_wall_clock_s": 1800, "patience": 3},
+  "candidate_timeout_s": 300,
+  "final_reserve_s": 120,
+  "max_repairs": 2,
+  "max_llm_calls": 30,
+  "reflection_enabled": true,
+  "breakthrough_delta": 0.01,
+  "collapse_delta": -0.01
+}
+```
+
+Defaults retain 50 candidates and six hours, with a 120-second finalization
+reserve, 1,800-second limit per runner invocation, three repairs per candidate,
+two proposal attempts, two initial mutation attempts, and 200 logical model
+calls. Default proposal/mutation output caps are 4,096/8,192 tokens; reflection
+uses 128. Prompts exceeding 200,000 characters pause the run rather than silently
+dropping history. Model calls are counted before dispatch; returned token usage
+is accumulated separately and is not a hard total-token or dollar budget.
+Transport retries and requests lost during interruption can still incur costs.
+
+Each candidate counts even when no valid proposal or code change results; an
+`unproposed` placeholder edge identifies proposal failures. No-change attempts
+skip training. Repairs stay within the candidate and start fresh checkpoints
+after code changes. Execution failures after repair exhaustion enter memory;
+provider, Git, storage, data-loading, and dependency-provisioning failures pause
+instead of being treated as negative ML evidence. Inspect local execution logs
+before resuming. Invalid dependency pin syntax can be repaired automatically;
+failed package installation requires resolving the provisioning issue first.
+
+The orchestrator freezes a content fingerprint of the CSV inputs and evaluator,
+and rejects changes on resume. This detects drift, not hostile candidate access;
+the subprocess runner remains a trusted-code tool, not a security sandbox.
+Diagnostic redaction covers configured/common credential forms but cannot
+guarantee removal of arbitrary private text. Keep secrets out of candidate code.
+
+Run outputs live under the chosen directory:
+
+```text
+current.json                 # Atomic pointer to a complete generation
+snapshots/<id>/state.json     # Stage, configuration, attempts, artifact references
+snapshots/<id>/tree.json      # Search tree (after successful genesis)
+snapshots/<id>/memory.json    # Evidence and optional interpretations
+workspace/                   # Owned independent Git repository
+executions/<id>/              # Runner results, logs, and predictions
+checkpoints/                 # Per-execution model checkpoints
+events.jsonl                 # Structured orchestration and execution events
+report.json                  # Final comparison, test result, and artifact index
+```
+
+Checkpoint events retain `event="stage.saved"` and include a `data.reason`:
+`stage_entered`, `attempt_reserved`, `model_request_started`,
+`model_response_received`, `candidate_committed`, or `execution_scheduled`.
+Resume/error paths additionally use `candidate_restored`, `attempt_released`,
+`execution_retry_prepared`, and `run_paused`. `attempt` is included when applicable
+and identifies the stage-local attempt (proposal, mutation, repair, or reflection).
+`call_id` connects each model request/response within the run; scheduled jobs also
+include `execution_id`.
+
+```json
+{"event":"stage.saved","data":{"stage":"propose","node_id":"node_001","reason":"model_request_started","attempt":1,"call_id":1}}
+```
+
+Model-response checkpoints include `elapsed_s` for the client call (including its
+transport retries, excluding checkpoint writes), `token_usage` with prompt,
+completion, and total counts, and `finish_reason`. Missing usage/finish reason is
+`null`; unfamiliar finish reasons are logged as `other`. A truncated response is
+logged before parsing rejects it, making retries visible. No prompts, code,
+response text, credentials, or raw provider exception messages are logged by
+these checkpoint events. Older run logs are left unchanged.
+
+Snapshots are retained, including unpublished generations left by interrupted
+writes. A run-level process lease prevents concurrent orchestrators. Workers hold
+a separate lease so source restoration refuses while a surviving worker is
+active; after abrupt process termination, ensure leftover provisioning/worker
+processes have exited before resuming. Do not delete lease files to bypass this.
+Completed runner `result.json` files are reconciled without retraining; incomplete
+executions may resume the same compatible checkpoint. Interrupted model calls
+consume attempt allowances; interrupted optional reflection is skipped. Tree and
+memory publish in the same checkpoint generation to prevent double accounting.
+
+Best-pipeline selection uses validation only, including valid pruned nodes and
+genesis fallback. The selected commit and checkpoint checksum are fixed before
+test inference. A completed test result is reused on resume. If time expires,
+the report explicitly records missing final inference. CLI exit codes are 0 for
+successful final inference, 2 for a finalized run without it, and 1 for an error.
+
+Provider timeouts and retry sleeps respect the shared remaining deadline, but
+blocking native/provider operations, Git, hashing, data loading, scoring, and
+state writes are not preempted by an OS watchdog. The reserve is a scheduling
+allowance, not a guarantee that finalization can finish. Injected custom clients
+must provide their own interruption behavior.
+
+Checks (the first two require no model credentials or package downloads):
+
+```powershell
+python -B scripts/test_budget_state.py
+python -B scripts/test_orchestrator.py
+python -B scripts/test_orchestrator.py --real-runner
+```
+
+The last command uses the real FM, environment manager, subprocess runner, and
+synthetic data with mocked model responses. It may provision pinned dependencies
+if the environment is not cached; it does not make live LLM requests.
+
+For the configured Gemini model, live testing found that default reasoning could
+exhaust both 1,024- and 4,096-token proposal caps before producing a complete
+answer. The then-supported shared setting `LLM_REASONING_EFFORT=low` returned a complete diagnostic proposal with
+the 4,096-token cap. Set this optional environment variable (or `.env` entry) for
+bounded Gemini runs; leave it blank for the provider default. Support varies by
+provider/model. The parser accepts a single complete JSON code fence but still
+rejects truncated responses and surrounding commentary.
+
+A full-data live smoke run on 2026-08-30 with `gemini/gemini-3.5-flash` and
+The then-supported shared setting `LLM_REASONING_EFFORT=low` completed one candidate in 135 seconds using two model
+calls (11,851 reported tokens). Gemini proposed `k=8` and `l2=1e-4`; mutation and
+training succeeded without repairs. Candidate validation Primary was 0.599926
+versus genesis 0.601469, so genesis was retained. Final test Primary was 0.595341.
+This verifies the live integration, not an improvement or a full-budget search.
 
 ### Train, evaluate, and recover a candidate
 
@@ -487,7 +627,7 @@ Use Python 3.10 or newer for the client. Install dependencies from the project r
 python -m pip install -r requirements.txt
 ```
 
-For a fresh clone, copy `.env.example` to `.env` (do not overwrite existing credentials). Set `LLM_MODEL` to your provider/model identifier and replace `<YOUR-API-KEY>` in `LLM_API_KEY`. Optionally set `LLM_API_BASE` for a custom endpoint. `.env` is Git-ignored. Existing process environment variables take precedence over the file. No default model is selected because the correct model and provider depend on your key.
+For a fresh clone, copy `.env.example` to `.env` (do not overwrite existing credentials). Set both `LLM_HIGH_MODEL` and `LLM_LOW_MODEL` to explicit provider/model identifiers and set each profile's `API_KEY`. Optionally set each profile's `API_BASE` for a custom endpoint. `.env` is Git-ignored. Existing process environment variables take precedence over the file. No default model is selected because the correct model and provider depend on your key.
 
 The client uses [LiteLLM's provider translation](https://docs.litellm.ai/docs/completion/input). Model identifiers use provider prefixes such as `anthropic/`, `gemini/`, `openrouter/`, `openai/`, or `ollama_chat/`. For local providers without authentication, leave the key blank. Providers using cloud credentials may require additional provider-specific environment configuration.
 
@@ -502,7 +642,7 @@ python scripts/test_llm.py --live
 ```python
 from agent.llm.client import LLMClient
 
-client = LLMClient.from_env()
+client = LLMClient.from_env(profile="high")
 result = client.complete([
     {"role": "system", "content": "Be concise."},
     {"role": "user", "content": "Suggest one ranking experiment."},
@@ -514,4 +654,56 @@ print(client.total_usage)
 
 `complete(messages)` is the single completion interface for both the real and mock clients. It accepts text chat messages and supports a per-call model and output-token limit override. Create a separate client when changing provider credentials or endpoint. This initial interface is synchronous and text-only, without streaming or tool calls.
 
-The wrapper retries transient failures with bounded exponential backoff and jitter, but does not retry authentication or invalid-request failures. `LLM_MAX_RETRIES` counts retries after the first attempt; `LLM_TIMEOUT` is per attempt, not a global research deadline. The future orchestrator must enforce the overall run budget. Usage totals count returned provider-reported tokens only, not potentially billed failed requests; missing usage is explicitly represented by `None`. Raw provider exception messages are not included in wrapper errors.
+The wrapper retries transient failures with bounded exponential backoff and jitter, but does not retry authentication or invalid-request failures. Each profile's `MAX_RETRIES` counts retries after the first attempt; its `TIMEOUT` is the per-attempt ceiling. The orchestrator supplies a monotonic deadline that further limits each request and retry delay. Usage totals count returned provider-reported tokens only, not potentially billed failed requests; missing usage is explicitly represented by `None`. Raw provider exception messages are not included in wrapper errors.
+
+### Detailed local diagnostics
+
+Every orchestrated model call now writes full redacted prompts and responses to
+`<run-dir>/diagnostics/*.json`, linked by events in `events.jsonl`. This includes
+transport attempts, request settings, retry delays, elapsed times, raw provider
+response fields (including usage and finish reasons), HTTP status, request IDs
+and Retry-After when the provider exposes them. Final LLM errors retain their
+provider diagnostic details instead of discarding the cause.
+
+Stage entry snapshots, rejected proposals/edits, model failures, orchestrator
+exceptions and CLI failures also have diagnostic artifacts. Exception records
+include complete tracebacks and cause chains, plus subprocess commands, exit
+codes and captured output when available. Runner failures identify the phase
+and execution artifact directory; worker and environment commands have start
+and finish events. Existing per-execution stdout/stderr files remain available.
+Checkpoint events remain `stage.saved` with explicit reasons.
+
+These files may contain private source code, prompts and provider responses.
+Keep run storage private and inspect it before sharing. Structured diagnostics
+redact configured credentials, sensitive environment values, common credential
+fields, bearer tokens and URL passwords. They do not capture frame locals or
+dump the environment, and do not enable provider SDK debug logging. Redaction
+cannot guarantee detection of arbitrary secrets embedded in code or candidate
+stdout/stderr; the existing raw subprocess logs are not sanitized. There is no
+automatic rotation or payload truncation: monitor disk usage during long runs.
+Logging is best effort; diagnostic write failures produce warning events rather
+than stop the run. These changes cannot recover provider details discarded by
+older runs. No extra model requests are made for logging.
+
+### High and low model profiles
+
+The orchestrator uses `LLM_HIGH_*` for improvement proposals and `LLM_LOW_*`
+for mutation, repair, and reflection. Both `LLM_HIGH_MODEL` and `LLM_LOW_MODEL`
+must be configured explicitly. There is no base `LLM_MODEL` fallback. Standalone
+improvement also uses high; unqualified `LLMClient.from_env()` uses low.
+
+Each profile accepts `API_KEY`, `API_BASE`, `REASONING_EFFORT`, `TIMEOUT`,
+`MAX_RETRIES`, and `MAX_TOKENS` suffixes. There are no shared environment settings or credential fallbacks. Set each
+profile independently; if both use the same provider, their keys may be identical.
+Blank optional settings use code defaults; blank API_BASE selects the provider default. Never commit `.env`.
+The template sets high/low reasoning and a 180-second high-profile timeout.
+Model fields are blank until you choose explicit LiteLLM provider/model IDs.
+
+Clients are cached per profile and share the run's existing call and time
+budgets. Model-request diagnostic artifacts record the selected profile, model,
+and reasoning effort. Explicit injected clients still override environment
+routing for tests/custom integrations. Engine-specific token caps in RunConfig
+continue to override client defaults; high reasoning may need a larger
+`proposal_tokens` cap than the previous low-reasoning run. No automatic repair
+escalation is enabled. Environment profile changes take effect on process start
+or resume, not in an already-running process.

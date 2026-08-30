@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -32,6 +33,7 @@ class RunResult:
     scores: dict | None
     elapsed_s: float
     error: str | None = None
+    failure_kind: str | None = None
 
 
 def _digest(value):
@@ -49,7 +51,7 @@ class Runner:
         self.environments = EnvironmentManager(environment_dir, self.python, wheelhouse, self.logger)
 
     def run(self, workspace_dir, *, data_dir=None, splits=None, overrides=None,
-            checkpoint_path=None, timeout_s=3600, split='valid', train=True):
+            checkpoint_path=None, timeout_s=3600, split='valid', train=True, attempt_id=None):
         """Train on train/valid, then score valid (or explicitly requested test).
 
         Supply either raw data_dir or preloaded splits. Timeout covers environment
@@ -65,7 +67,10 @@ class Runner:
         workspace = Path(workspace_dir).resolve()
         if not all((workspace / name).is_file() for name in ('config.py', 'features.py', 'model.py', 'train.py')):
             raise ValueError('workspace must contain all four pipeline modules')
-        run_id = uuid.uuid4().hex
+        if attempt_id is not None and (not isinstance(attempt_id, str)
+                                      or re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', attempt_id) is None):
+            raise ValueError('invalid attempt_id')
+        run_id = attempt_id if attempt_id is not None else uuid.uuid4().hex
         artifacts = self.storage_dir / run_id
         artifacts.mkdir(parents=True)
         checkpoint = Path(checkpoint_path).resolve() if checkpoint_path else self.checkpoint_dir / (run_id + '.pkl')
@@ -79,11 +84,14 @@ class Runner:
         context = None
         environment = None
         error_type = None
+        failure_kind = None
+        phase = 'environment'
         self.logger.emit('run.started', component='runner', run_id=run_id,
                          workspace=str(workspace), artifact_dir=str(artifacts),
                          checkpoint_path=str(checkpoint), training=train, split=split)
         try:
             environment = self.environments.prepare(workspace, artifacts, deadline, run_id=run_id)
+            phase = 'data'
             splits = load(data_dir) if splits is None else splits
             required = {'train', 'valid', split} if train else {split}
             for name in required:
@@ -101,6 +109,7 @@ class Runner:
             }
             if train:
                 context['data'] = _digest({n: splits[n] for n in ('train', 'valid')})
+            phase = 'candidate'
             with tempfile.TemporaryDirectory(prefix='runner-', dir=artifacts) as temporary:
                 request = Path(temporary) / 'request.json'
                 if train:
@@ -114,6 +123,10 @@ class Runner:
                 self._worker('predict', workspace, request, checkpoint, artifacts, deadline, environment)
                 if hashlib.sha256(checkpoint.read_bytes()).hexdigest() != checkpoint_hash:
                     raise ValueError('inference modified the checkpoint')
+            current_source = _digest({str(p.relative_to(workspace)): p.read_text(encoding='utf-8')
+                                      for p in sorted(workspace.rglob('*.py'))})
+            if current_source != context['source']:
+                raise ValueError('candidate modified its source during execution')
             predictions = np.asarray(json.loads((artifacts / 'predictions.json').read_text(encoding='utf-8')),
                                      dtype=np.float64)
             if predictions.shape != (len(splits[split]),) or not np.isfinite(predictions).all():
@@ -128,15 +141,22 @@ class Runner:
                 metrics = MetricResult(scores['GAUC'], scores['nDCG@5'], scores['primary'], elapsed)
             status = 'success'
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
+            self.logger.exception('execution.failed', exc, component='runner', run_id=run_id,
+                                  phase=phase, artifact_dir=str(artifacts))
             error_type = type(exc).__name__
             status, error = 'timeout', str(exc)
             scores = metrics = None
+            failure_kind = 'timeout'
         except Exception as exc:
+            self.logger.exception('execution.failed', exc, component='runner', run_id=run_id,
+                                  phase=phase, artifact_dir=str(artifacts))
             error_type = type(exc).__name__
             error = f'{type(exc).__name__}: {exc}'
             scores = metrics = None
+            failure_kind = ('infrastructure' if phase in ('environment', 'data')
+                            or isinstance(exc, OSError) else 'candidate')
         result = RunResult(status, str(checkpoint), str(artifacts), metrics, scores,
-                           time.monotonic() - started, error)
+                           time.monotonic() - started, error, failure_kind)
         report = {**asdict(result), 'context': context, 'split': split, 'training': train,
                   'environment': environment.metadata if environment else None,
                   'overrides': overrides or {}, 'checkpoint_exists': checkpoint.is_file(),
@@ -145,6 +165,7 @@ class Runner:
         try:
             (artifacts / 'result.json').write_text(json.dumps(report, indent=2, allow_nan=False), encoding='utf-8')
         except Exception as exc:
+            self.logger.exception('run.report_exception', exc, component='runner', run_id=run_id)
             self.logger.emit('run.report_failed', component='runner', run_id=run_id, level='error',
                              artifact_dir=str(artifacts), error_type=type(exc).__name__)
             raise
@@ -164,10 +185,14 @@ class Runner:
         env['PATH'] = str(Path(environment.python).parent) + os.pathsep + env.get('PATH', '')
         command = [environment.python, '-I', '-B', '-u', str(Path(__file__).with_name('worker.py')), mode,
                    str(workspace), str(request), str(checkpoint), str(artifacts / 'predictions.json')]
+        self.logger.emit('worker.started', component='runner', run_id=Path(artifacts).name, mode=mode, command=command,
+                         timeout_s=remaining, artifact_dir=str(artifacts))
         with (artifacts / (mode + '.stdout.log')).open('wb') as stdout, \
                 (artifacts / (mode + '.stderr.log')).open('wb') as stderr:
             subprocess.run(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr,
                            timeout=remaining, check=True)
+        self.logger.emit('worker.finished', component='runner', run_id=Path(artifacts).name, mode=mode, returncode=0,
+                         artifact_dir=str(artifacts))
         self.environments.verify(environment, artifacts, deadline)
 
 

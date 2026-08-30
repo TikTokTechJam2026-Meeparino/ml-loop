@@ -70,13 +70,25 @@ class ImprovementTests(unittest.TestCase):
             ImprovementEngine(MockLLMClient([LLMError("failed")])).propose(
                 self.files, [self.root], **self.options)
 
+    def test_complete_json_fence_is_accepted_but_partial_output_is_not(self):
+        complete = '```json\n{"requirement": "Increase capacity"}\n```'
+        result = ImprovementEngine(MockLLMClient([complete])).propose(
+            self.files, [self.root], **self.options)
+        self.assertIn("Increase capacity", result)
+        for output in (complete[:-3], "Explanation\n" + complete,
+                       complete + "\nExtra commentary", complete + "\n" + complete,
+                       LLMResponse(complete, "mock", None, "length", 1)):
+            with self.subTest(output=output), self.assertRaises(ProposalError):
+                ImprovementEngine(MockLLMClient([output])).propose(
+                    self.files, [self.root], **self.options)
+
     def test_default_client_reused(self):
         client = MockLLMClient(['{"requirement": "Try capacity"}'] * 2)
         with patch("agent.improvement.improvement.LLMClient.from_env", return_value=client) as factory:
             engine = ImprovementEngine()
             for _ in range(2):
                 engine.propose(self.files, [self.root], **self.options)
-            factory.assert_called_once_with()
+            factory.assert_called_once_with(profile="high")
 
 
 if __name__ == "__main__":

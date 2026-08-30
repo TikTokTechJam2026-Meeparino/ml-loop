@@ -70,7 +70,7 @@ class ReflectionEngine:
         ]
         if self.client is None:
             try:
-                self.client = LLMClient.from_env()
+                self.client = LLMClient.from_env(profile="low")
             except (LLMError, ValueError):
                 return None
         try:

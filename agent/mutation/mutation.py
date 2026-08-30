@@ -54,7 +54,7 @@ class CodeMutationEngine:
         snapshot = dict(files)
         messages = build_edit_messages(requirement, snapshot)
         if self.client is None:
-            self.client = LLMClient.from_env()
+            self.client = LLMClient.from_env(profile="low")
         response = self.client.complete(messages, model=model, max_tokens=max_tokens)
         # A token-limited output may end after one valid block while omitting
         # other required edits. Do not mistake that partial response for success.

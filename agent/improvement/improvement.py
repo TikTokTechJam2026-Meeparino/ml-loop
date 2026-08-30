@@ -1,6 +1,7 @@
 """Choose one requirement for CodeMutationEngine without editing code."""
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 
 from agent.graph.node import SearchNode
@@ -39,12 +40,18 @@ class ImprovementEngine:
         messages = build_messages(files, lineage, objective=objective,
                                   constraints=constraints, context=context)
         if self.client is None:
-            self.client = LLMClient.from_env()
+            self.client = LLMClient.from_env(profile="high")
         response = self.client.complete(messages, model=model, max_tokens=max_tokens)
         if response.finish_reason in {"length", "max_tokens", "content_filter"}:
             raise ProposalError("Proposal was truncated or filtered")
+        # Providers may wrap an otherwise valid object despite the prompt. Only
+        # unwrap one complete JSON fence; do not recover partial/arbitrary text.
+        payload = response.text.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", payload, flags=re.DOTALL)
+        if fenced is not None:
+            payload = fenced.group(1)
         try:
-            proposal = json.loads(response.text)
+            proposal = json.loads(payload)
         except (ValueError, TypeError) as exc:
             raise ProposalError("Expected a JSON requirement object") from exc
         if (not isinstance(proposal, dict) or set(proposal) != {"requirement"}
