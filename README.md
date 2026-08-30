@@ -73,6 +73,37 @@ Search state, failure caches, and cross-branch insights persist outside candidat
 
 `prompt_summary(context)` selects up to six contextual insights with a 2,400-character cap, excludes other evaluation protocols, and deduplicates equivalent observations for the prompt without deleting evidence. Pass `max_tokens` and the target model's `token_counter` for a token cap on the complete summary. `save()` and `load()` use versioned `storage/global_insights.json` with atomic replacement and validation. Prompt assembly and recording remain explicit orchestrator responsibilities; they are not automatically wired into the mutation engine. Run offline checks with `python scripts/test_memory.py`.
 
+### Improvement selection
+
+`agent/improvement/` chooses one concrete change before code mutation. Categories
+are not required. `ImprovementEngine.propose()` takes the current editable source
+snapshot, the full genesis-to-current lineage (including edge diffs and results),
+an objective, and frozen constraints. Optional context can include configuration,
+sibling attempts, cross-branch memory, and remaining budgets. It returns a requirement
+string directly consumable by `CodeMutationEngine`:
+
+```python
+from agent.improvement import ImprovementEngine
+from agent.mutation.mutation import CodeMutationEngine
+
+requirement = ImprovementEngine(client).propose(
+    files,
+    tree.get_lineage_chain(parent.node_id),
+    objective="Improve validation Primary within the remaining experiment budget.",
+    constraints="Keep data splits, target, metrics, and test isolation unchanged.",
+    context=context_summary,
+)
+updated_files = CodeMutationEngine(client).mutate(requirement, files)
+```
+
+The caller supplies these variables and is responsible for source/commit
+correspondence, context size, redaction, and budget enforcement. Proposal output
+is validated structurally; its scientific merit and compliance still require
+review/evaluation by the execution layer. Caller constraints are preserved in
+the returned requirement. Neither proposal nor mutation executes code or writes
+files. Autonomous orchestration remains unwired. Run offline checks with
+`python -B scripts/test_improvement.py`.
+
 ### Bounded self-repair
 
 Runtime exceptions, tensor shape mismatches, and CUDA out-of-memory errors trigger a bounded repair loop. Repairs and their outcomes are logged, and retries consume the same wall-clock budget as the rest of the run.
