@@ -284,30 +284,102 @@ The editable template contains `features.py`, `model.py`, `train.py`, `config.py
 
 ### Launch or resume a search
 
-Install the root dependencies and configure the LLM as described below. Live
-search calls the configured provider and may incur charges. Use a new, dedicated
-run directory; the orchestrator owns its candidate workspace and may discard
-uncommitted edits there when restoring saved stages.
+Run these commands in **PowerShell from the repository root**. The application
+runs in the foreground; keep that terminal open. Live search sends candidate code
+and experiment history to your configured providers and may incur API charges.
+
+For first-time setup, install Git and Python, then create the root environment:
 
 ```powershell
-python -B main.py --run-dir storage/search-001 --data-dir data/kuairand-pure/KuaiRand-Pure/data
-python -B main.py --run-dir storage/search-001 --resume
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Optional `--config path/to/run.json` accepts `RunConfig` fields for new runs:
+Skip installation if the existing `.venv` is ready. Activation is unnecessary:
+all commands below use its Python executable directly. Fill in `LLM_HIGH_MODEL`
+and `LLM_HIGH_API_KEY` for improvement, and `LLM_LOW_MODEL` and `LLM_LOW_API_KEY`
+for mutation, repair, and reflection. Set the corresponding reasoning efforts
+in `.env`; use provider/model IDs supported by LiteLLM. Provider API billing must
+be funded. Never put credentials in the run config or commit `.env`.
+
+The examples assume the prepared KuaiRand-Pure CSVs are at
+`data/kuairand-pure/KuaiRand-Pure/data`; adjust `--data-dir` if yours are elsewhere.
+
+**Three-iteration sample.** Create `storage` if needed (`New-Item -ItemType
+Directory -Force storage`), and save this JSON as `storage/run-3.json`:
 
 ```json
 {
-  "search": {"max_iterations": 5, "max_wall_clock_s": 1800, "patience": 3},
-  "candidate_timeout_s": 300,
-  "final_reserve_s": 120,
-  "max_repairs": 2,
-  "max_llm_calls": 30,
-  "reflection_enabled": true,
-  "breakthrough_delta": 0.01,
-  "collapse_delta": -0.01
+  "search": {
+    "max_iterations": 3,
+    "max_wall_clock_s": 3600,
+    "patience": 3,
+    "max_children": 3
+  },
+  "candidate_timeout_s": 1800,
+  "final_reserve_s": 180,
+  "max_repairs": 3,
+  "proposal_attempts": 2,
+  "mutation_attempts": 2,
+  "proposal_tokens": 16384,
+  "mutation_tokens": 8192,
+  "max_llm_calls": 24,
+  "reflection_enabled": true
 }
 ```
+
+Then start a fresh run:
+
+```powershell
+.\.venv\Scripts\python.exe -B main.py --run-dir storage/sample-3-001 --data-dir data/kuairand-pure/KuaiRand-Pure/data --config storage/run-3.json
+```
+
+This is the same configuration used for the current paid three-iteration sample.
+It evaluates genesis, attempts three candidates, and evaluates the selected
+pipeline on the final test split. Safety limits can stop it early; failed
+candidate attempts still count. The larger proposal cap leaves room for high
+reasoning. `--config` accepts RunConfig fields and is optional for new runs.
+
+**Watch progress from a second PowerShell terminal:**
+
+```powershell
+Get-Content storage/sample-3-001/events.jsonl -Tail 20 -Wait
+```
+
+The main terminal can be quiet during training/model calls. Events identify the
+stage, node and diagnostics artifact. Full improvement outputs are in the
+`model.response` artifacts for stage `propose`. Read `current.json` to locate
+the newest snapshot; each node's `incoming_edge.hypothesis` in its `tree.json`
+contains the selected requirement. When finished, read `report.json` for scores,
+selected node, candidate outcomes, and artifact paths.
+
+**Resume after fixing an error or stopping the process:**
+
+```powershell
+.\.venv\Scripts\python.exe -B main.py --run-dir storage/sample-3-001 --resume
+```
+
+Do not pass `--config` or `--data-dir` with `--resume`: saved run settings are
+reused. Model profiles are read from the current environment. The original
+wall-clock deadline still applies; paused time counts. Resume does not add
+iterations to a completed run. Confirm the old process and its workers have
+stopped before resuming; never delete lock files to force it.
+
+**Refresh/start over:** use a new directory such as `storage/sample-3-002` with
+the fresh-run command. This creates a new tree and memory while retaining the
+old run. A populated directory is rejected for a new run. The orchestrator owns
+its candidate workspace and may discard uncommitted edits there when restoring
+stages; do not edit it during execution.
+
+For a 50-iteration run, copy the sample config and set `max_iterations` and
+`patience` to 50, `max_wall_clock_s` to 21600, and `max_llm_calls` to 400. Keep
+other settings as appropriate and choose another fresh run directory. These are
+safety ceilings, not a guarantee that all 50 attempts will finish.
+
+Exit codes: `0` means final test evaluation succeeded (not necessarily a better
+model); `1` means an exception stopped the run; `2` means the run finalized but
+its final test did not succeed.
 
 Defaults retain 50 candidates and six hours, with a 120-second finalization
 reserve, 1,800-second limit per runner invocation, three repairs per candidate,
@@ -344,6 +416,7 @@ workspace/                   # Owned independent Git repository
 executions/<id>/              # Runner results, logs, and predictions
 checkpoints/                 # Per-execution model checkpoints
 events.jsonl                 # Structured orchestration and execution events
+diagnostics/<id>.json        # Full redacted model outputs and error details
 report.json                  # Final comparison, test result, and artifact index
 ```
 
