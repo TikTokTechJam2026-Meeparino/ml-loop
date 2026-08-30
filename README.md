@@ -55,19 +55,23 @@ flowchart TD
 
 Each accepted node should retain its commit hash, parent reference, hypothesis, configuration, random seeds, validation metrics, resource usage, and artifact references. Edges identify the subsystem changed and the evidence motivating that change.
 
-Only runnable candidates with valid evaluations enter the graph. Failed attempts remain in a separate experiment ledger so that execution errors do not create invalid pipeline states. Valid candidates that underperform remain useful evidence, even when their branches are no longer expanded.
+The tree registry retains pending, running, successful, failed, and pruned attempts. Only successful, unpruned pipelines are eligible for expansion. Failed attempts remain in the registry for budget and reward accounting without becoming eligible pipeline states. Valid candidates that underperform remain useful evidence, even when their branches are no longer expanded.
 
 ### Parent selection and pruning
 
-A hybrid **Upper Confidence Bound for Trees (UCT) / best-first** policy balances high validation scores with exploration of less-visited branches. The search backtracks when a branch plateaus and prunes unproductive expansion paths while preserving their history.
+The implemented **Upper Confidence Bound for Trees (UCT)** policy uses backed-up mean validation Primary plus `c * sqrt(log(parent_visits) / visits)`, with `c = sqrt(2)` by default. Each completed attempt backs up its absolute Primary along its lineage; failures back up zero. Genesis starts with zero visits and is excluded from the iteration budget. The implementation uses a single-parent tree and permits one active attempt at a time.
 
-The precise selection formula, exploration coefficient, reward normalization, and pruning rules are implementation decisions that must be recorded in the run configuration.
+Selection expands a successful node until its child-attempt limit is reached (default three, including failures), then descends by UCT. Exhausted subtrees are skipped to backtrack. A successful candidate whose Primary drops by more than 0.01 relative to its parent is pruned; a failed candidate remains failed without pruning its parent. Pruning preserves history, and final best-pipeline selection includes evaluated pruned nodes. These settings are persisted in the tree checkpoint.
 
 ### Git isolation and persistent memory
 
 Each candidate transformation runs on an ephemeral branch in an isolated workspace based on its selected parent's commit. Dataset splits remain read-only; checkpoints and other bulky artifacts live outside Git and are referenced by the experiment ledger.
 
 Search state, failure caches, and cross-branch insights persist outside candidate workspaces. Hypothesis records should include their configuration and data context so that the agent can avoid repeating refuted experiments without incorrectly rejecting a hypothesis under materially different conditions.
+
+`ExplorationMemory` in `agent/graph/memory.py` records terminal outcomes through `record(node, parent, context, stderr=..., reflection=...)`. Supply a `MemoryContext` with run ID, evaluation protocol ID, subsystem, and relevant configuration/shapes/seeds. Numeric gains and losses are relative to the parent; neutral results are retained, and pruning status does not determine whether an experiment improved. Terminal failures require an error signature and the final ten stderr lines. All terminal outcomes can carry optional reflections under 20 words, labelled as model interpretations without replacing numeric or error evidence. Memory never calls an LLM or applies reflection thresholds. The future orchestrator should gate reflection on significant parent-relative gains/losses or failures after repair exhaustion, subject to remaining budgets; pruning alone is not a trigger. Routine iterations need only numeric summaries. Diagnostic text should be redacted before it is supplied to memory or an LLM.
+
+`prompt_summary(context)` selects up to six contextual insights with a 2,400-character cap, excludes other evaluation protocols, and deduplicates equivalent observations for the prompt without deleting evidence. Pass `max_tokens` and the target model's `token_counter` for a token cap on the complete summary. `save()` and `load()` use versioned `storage/global_insights.json` with atomic replacement and validation. Prompt assembly and recording remain explicit orchestrator responsibilities; they are not automatically wired into the mutation engine. Run offline checks with `python scripts/test_memory.py`.
 
 ### Bounded self-repair
 
@@ -95,7 +99,7 @@ Each experiment should test one explicit hypothesis within a subsystem. Auxiliar
 5. **Select and freeze.** Choose the best valid pipeline by validation Primary before accessing the test set. If no candidate improves on FM, retain the reference pipeline.
 6. **Run final inference.** Export test predictions and, where labels are available, final test metrics without using them for further tuning.
 
-**Proposed convergence interpretation:** compare the best-so-far validation Primary at the start and end of each candidate iteration. An improvement below 0.002 increments a patience counter; an improvement of at least 0.002 resets it. Stop after three consecutive below-threshold iterations. Failed attempts provide no improvement. This operational definition should be confirmed and frozen before implementation.
+**Implemented convergence interpretation:** compare best-so-far validation Primary now with its value three completed candidate iterations earlier. Stop if the total improvement across that window is at most 0.002; continuing requires strictly more than 0.002. Failed attempts count as iterations with no improvement. The comparison uses an absolute tolerance of 1e-12 at the threshold. Iteration and elapsed-time limits are independent stop conditions.
 
 The six-hour budget covers initialization, baseline training, search, repairs, and final inference. The scheduler must reserve time for final inference and artifact export, and enforce timeouts on running jobs rather than checking the deadline only between experiments. If the run cannot complete, it must report that limitation explicitly.
 
