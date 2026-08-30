@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from agent.engine.prompts import _file_path
+from agent.mutation.prompts import _file_path
 
 
 class EditError(ValueError):

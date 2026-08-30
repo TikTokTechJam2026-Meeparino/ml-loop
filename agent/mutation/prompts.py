@@ -38,7 +38,7 @@ EDITING RULES
   compatibility. Do not introduce label leakage or change benchmark rules to
   obtain a better score.
 - Edit only files included in SOURCE FILES, using their exact supplied paths.
-  Do not rename or delete files, edit secrets, or propose shell commands.
+  Do not create, rename, or delete files, edit secrets, or propose shell commands.
 - SEARCH must be copied verbatim from the target file, including whitespace,
   indentation, blank lines, and comments. Do not abbreviate it with ellipses.
 - Each nonempty SEARCH must match exactly once. Include sufficient unchanged

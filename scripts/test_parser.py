@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.engine.parser import EditError, apply_edits, parse_edits
+from agent.mutation.parser import EditError, apply_edits, parse_edits
 
 
 def block(filename, search, replacement, fence="```", newline="\n"):

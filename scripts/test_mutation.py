@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.engine.mutation import CodeMutationEngine
-from agent.engine.parser import EditError
+from agent.mutation.mutation import CodeMutationEngine
+from agent.mutation.parser import EditError
 from agent.llm.client import LLMResponse, LLMError
 from agent.llm.mock_client import MockLLMClient
 
@@ -49,7 +49,7 @@ class MutationTests(unittest.TestCase):
         self.assertIsNot(result, files)
 
     def test_invalid_inputs_do_not_initialize_client(self):
-        with patch("agent.engine.mutation.LLMClient.from_env") as factory:
+        with patch("agent.mutation.mutation.LLMClient.from_env") as factory:
             engine = CodeMutationEngine()
             for requirement, files in [("", {"a.py": "x"}), ("Edit", {}),
                                        ("Edit", {"../a.py": "x"}), ("Edit", {"a.py": 123}),
@@ -78,7 +78,7 @@ class MutationTests(unittest.TestCase):
 
     def test_default_client_initialized_once(self):
         client = MockLLMClient(["NO_CHANGES", "NO_CHANGES"])
-        with patch("agent.engine.mutation.LLMClient.from_env", return_value=client) as factory:
+        with patch("agent.mutation.mutation.LLMClient.from_env", return_value=client) as factory:
             engine = CodeMutationEngine()
             engine.mutate("Keep", {"a.py": "one"})
             engine.mutate("Keep", {"a.py": "one"})
