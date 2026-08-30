@@ -1,0 +1,15 @@
+# Independent pipeline repository; managed by the agent.
+/workspace/
+
+# Raw datasets and downloaded archives; keep the reference kit tracked.
+/data/kuairand-pure/KuaiRand-Pure/
+/data/kuairand-pure/*.tar.gz
+
+# Generated model artifacts.
+/checkpoints/*
+!/checkpoints/.gitkeep
+
+# Python runtime files.
+__pycache__/
+*.py[cod]
+.venv/
