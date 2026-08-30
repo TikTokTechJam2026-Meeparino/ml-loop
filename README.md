@@ -158,7 +158,7 @@ storage/                      # Ignored persistent outputs; .gitkeep is tracked
 └── global_insights.json
 data/kuairand-pure/            # Existing data layout preserved
 ├── starter-kit/              # Tracked fixed reference code and English README
-└── KuaiRand-Pure/data/        # Ignored raw dataset; currently empty
+└── KuaiRand-Pure/data/        # Ignored raw dataset; download separately below
 checkpoints/                  # Ignored weights and predictions; .gitkeep is tracked
 requirements.txt              # LLM client dependencies
 main.py                       # Planned CLI entry point
@@ -174,6 +174,23 @@ The driver uses the Git CLI through Python's `subprocess` module; Git must be in
 The LLM client, mutation engine, and Git workspace driver are implemented; the remaining agent modules, pipeline template files, and root CLI are scaffolding. The template's `evaluate.py` and `submit.py` will integrate the fixed scoring and submission checks from the reference kit outside the editable workspace; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Runtime storage files are ignored by the outer repository and should be initialized by the agent when needed; the current local placeholders are empty, not valid serialized JSON state.
 
 The root research CLI is not runnable yet. A reproducible FM baseline with a frozen evaluation contract remains a pending implementation milestone.
+
+### Download KuaiRand-Pure
+
+The raw dataset is not included in Git. Run these PowerShell commands from the project root to download the [KuaiRand-Pure archive from Zenodo](https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz), verify its MD5, and extract it into the expected folder:
+
+```powershell
+New-Item -ItemType Directory -Force data/kuairand-pure | Out-Null
+python -c "import urllib.request; urllib.request.urlretrieve('https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz', 'data/kuairand-pure/KuaiRand-Pure.tar.gz')"
+if ($LASTEXITCODE -ne 0) { throw 'Dataset download failed' }
+if ((Get-FileHash data/kuairand-pure/KuaiRand-Pure.tar.gz -Algorithm MD5).Hash -ne '0820331067a3784d9691136f772b35a7') {
+    throw 'Dataset MD5 mismatch; download the archive again before extracting'
+}
+tar -xzf data/kuairand-pure/KuaiRand-Pure.tar.gz -C data/kuairand-pure
+if ($LASTEXITCODE -ne 0) { throw 'Dataset extraction failed' }
+```
+
+The six CSV files will be in `data/kuairand-pure/KuaiRand-Pure/data/`. Both the archive and extracted dataset are Git-ignored. When running the reference scripts from `data/kuairand-pure/starter-kit/`, pass `--data_dir ../KuaiRand-Pure/data`; see the [starter-kit README](data/kuairand-pure/starter-kit/README.md) for baseline commands.
 
 ### LLM client setup and smoke test
 
