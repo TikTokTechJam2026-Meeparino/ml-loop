@@ -29,8 +29,11 @@ class ClientTests(unittest.TestCase):
     def test_usage_and_model_override(self):
         transport = Mock(return_value=response())
         client = self.client(transport, api_base="http://localhost:1234/v1")
-        result = client.generate("Hello", system="Be brief", model="test/other")
-        client.generate("Again")
+        result = client.complete(
+            [{"role": "system", "content": "Be brief"}, {"role": "user", "content": "Hello"}],
+            model="test/other",
+        )
+        client.complete([{"role": "user", "content": "Again"}])
         self.assertEqual(result.text, "OK")
         self.assertEqual(client.total_usage, TokenUsage(10, 2, 12))
         args = transport.call_args_list[0].kwargs
@@ -40,40 +43,42 @@ class ClientTests(unittest.TestCase):
 
     def test_retry_then_success(self):
         transport = Mock(side_effect=[TimeoutError(), response()])
-        self.assertEqual(self.client(transport).generate("Hello").attempts, 2)
+        self.assertEqual(self.client(transport).complete([{"role": "user", "content": "Hello"}]).attempts, 2)
 
     def test_retry_exhaustion(self):
         transport = Mock(side_effect=TimeoutError("secret"))
         with self.assertRaises(LLMError):
-            self.client(transport, max_retries=2).generate("Hello")
+            self.client(transport, max_retries=2).complete([{"role": "user", "content": "Hello"}])
         self.assertEqual(transport.call_count, 3)
 
     def test_rate_limit_retries(self):
         error = RuntimeError("rate limited")
         error.status_code = 429
         transport = Mock(side_effect=[error, response()])
-        self.assertEqual(self.client(transport).generate("Hello").attempts, 2)
+        self.assertEqual(self.client(transport).complete([{"role": "user", "content": "Hello"}]).attempts, 2)
 
     def test_auth_failure_is_not_retried_or_exposed(self):
         error = RuntimeError("secret-api-key")
         error.status_code = 401
         transport = Mock(side_effect=error)
         with self.assertRaises(LLMError) as caught:
-            self.client(transport).generate("Hello")
+            self.client(transport).complete([{"role": "user", "content": "Hello"}])
         self.assertNotIn("secret-api-key", str(caught.exception))
         self.assertEqual(transport.call_count, 1)
 
     def test_missing_usage_is_explicit(self):
         client = self.client(Mock(return_value=response(usage=False)))
-        self.assertIsNone(client.generate("Hello").usage)
+        self.assertIsNone(client.complete([{"role": "user", "content": "Hello"}]).usage)
         self.assertEqual(client.responses_without_usage, 1)
 
-    def test_placeholder_and_empty_prompt_never_call_transport(self):
+    def test_placeholder_and_empty_messages_never_call_transport(self):
         transport = Mock()
         with self.assertRaises(ValueError):
-            self.client(transport, api_key="<YOUR-API-KEY>").generate("Hello")
+            self.client(transport, api_key="<YOUR-API-KEY>").complete([{"role": "user", "content": "Hello"}])
         with self.assertRaises(ValueError):
-            self.client(transport).generate("")
+            self.client(transport).complete([{"role": "user", "content": ""}])
+        with self.assertRaises(ValueError):
+            self.client(transport).complete([])
         transport.assert_not_called()
 
     def test_empty_response_preserves_reported_usage(self):
@@ -81,7 +86,7 @@ class ClientTests(unittest.TestCase):
         raw["choices"][0]["message"]["content"] = None
         client = self.client(Mock(return_value=raw))
         with self.assertRaises(LLMError):
-            client.generate("Hello")
+            client.complete([{"role": "user", "content": "Hello"}])
         self.assertEqual(client.total_usage.total_tokens, 6)
 
 
@@ -94,7 +99,9 @@ def main():
         return 0 if result.wasSuccessful() else 1
     try:
         client = LLMClient.from_env()
-        result = client.generate("Reply with only the word OK.", max_tokens=128)
+        result = client.complete(
+            [{"role": "user", "content": "Reply with only the word OK."}], max_tokens=128
+        )
     except (ValueError, LLMError) as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1

@@ -118,20 +118,6 @@ class LLMClient:
     def from_env(cls, env_file: str | Path | None = None) -> LLMClient:
         return cls(LLMConfig.from_env(env_file))
 
-    def generate(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-    ) -> LLMResponse:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        return self.complete(messages, model=model, max_tokens=max_tokens)
-
     def complete(
         self,
         messages: Sequence[Mapping[str, str]],

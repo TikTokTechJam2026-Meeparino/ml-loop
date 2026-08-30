@@ -197,12 +197,15 @@ python scripts/test_llm.py --live
 from agent.llm.client import LLMClient
 
 client = LLMClient.from_env()
-result = client.generate("Suggest one ranking experiment.", system="Be concise.")
+result = client.complete([
+    {"role": "system", "content": "Be concise."},
+    {"role": "user", "content": "Suggest one ranking experiment."},
+])
 print(result.text)
 print(result.usage)
 print(client.total_usage)
 ```
 
-`generate()` accepts a prompt; `complete()` accepts text chat messages. Both support a per-call model and output-token limit override. Create a separate client when changing provider credentials or endpoint. This initial interface is synchronous and text-only, without streaming or tool calls.
+`complete(messages)` is the single completion interface for both the real and mock clients. It accepts text chat messages and supports a per-call model and output-token limit override. Create a separate client when changing provider credentials or endpoint. This initial interface is synchronous and text-only, without streaming or tool calls.
 
 The wrapper retries transient failures with bounded exponential backoff and jitter, but does not retry authentication or invalid-request failures. `LLM_MAX_RETRIES` counts retries after the first attempt; `LLM_TIMEOUT` is per attempt, not a global research deadline. The future orchestrator must enforce the overall run budget. Usage totals count returned provider-reported tokens only, not potentially billed failed requests; missing usage is explicitly represented by `None`. Raw provider exception messages are not included in wrapper errors.

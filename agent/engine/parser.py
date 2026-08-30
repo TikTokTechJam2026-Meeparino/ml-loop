@@ -1,0 +1,126 @@
+"""Parse and apply filename-labeled SEARCH/REPLACE edits entirely in memory."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from agent.engine.prompts import _file_path
+
+
+class EditError(ValueError):
+    """Malformed output or an edit that cannot be applied unambiguously."""
+
+
+@dataclass(frozen=True)
+class CodeEdit:
+    filename: str
+    search: str
+    replacement: str
+
+
+# Match the outer frame first, so a malformed block cannot consume a later
+# valid block. Longer fences support source containing triple backticks.
+_BLOCK = re.compile(
+    r"^FILE: (?P<filename>[^\r\n]+)\r?\n"
+    r"(?P<fence>`{3,})(?:[A-Za-z0-9_+.-]+)?\r?\n"
+    r"(?P<body>.*?)"
+    r"^(?P=fence)(?:\r?\n|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_MARKER = re.compile(r"^(<<<<<<< SEARCH|=======|>>>>>>> REPLACE)(?:\r?\n|\Z)", re.MULTILINE)
+
+
+def _payload(text: str) -> str:
+    """Remove one framing line ending before a delimiter, not code whitespace."""
+    if text.endswith("\r\n"):
+        return text[:-2]
+    if text.endswith("\n"):
+        return text[:-1]
+    return text
+
+
+def parse_edits(output: str) -> list[CodeEdit]:
+    """Parse strict FILE/fence/SEARCH/REPLACE output, or the NO_CHANGES sentinel.
+
+    One newline immediately before each delimiter is framing, not payload.
+    To include a trailing newline in a payload, emit an extra blank line before
+    its delimiter. Internal line endings and all other whitespace are literal.
+    Marker-only lines inside source cannot be represented by this format and
+    must be avoided by choosing a smaller edit region.
+    """
+    if not isinstance(output, str):
+        raise TypeError("LLM output must be a string.")
+    if output.strip() == "NO_CHANGES":
+        return []
+    edits = []
+    position = 0
+    for block in _BLOCK.finditer(output):
+        if output[position:block.start()].strip():
+            raise EditError("Unexpected text or malformed edit before a FILE block.")
+        filename = block.group("filename")
+        try:
+            _file_path(filename)
+        except ValueError as exc:
+            raise EditError(str(exc)) from None
+        body = block.group("body")
+        markers = list(_MARKER.finditer(body))
+        if (
+            len(markers) != 3
+            or [m.group(1) for m in markers] != ["<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"]
+            or markers[0].start() != 0
+            or markers[-1].end() != len(body)
+        ):
+            raise EditError(f"Malformed SEARCH/REPLACE markers in {filename}.")
+        # A closing fence of this length inside the body violates the framing.
+        fence = block.group("fence")
+        if re.search(r"(?m)^`{" + str(len(fence)) + r",}[^\S\r\n]*\r?$", body):
+            raise EditError(f"Use a longer outer code fence for {filename}.")
+        edits.append(CodeEdit(
+            filename,
+            _payload(body[markers[0].end():markers[1].start()]),
+            _payload(body[markers[1].end():markers[2].start()]),
+        ))
+        position = block.end()
+    if not edits or output[position:].strip():
+        raise EditError("Expected only complete FILE/SEARCH/REPLACE blocks or NO_CHANGES.")
+    return edits
+
+
+def apply_edits(files: Mapping[str, str], output: str) -> dict[str, str]:
+    """Return an edited dictionary without modifying the input mapping.
+
+    Edits run sequentially; SEARCH is literal text (never a regular expression).
+    Missing or ambiguous matches reject the entire result, even if earlier
+    edits succeeded. There is no filesystem access or code execution.
+    """
+    if not isinstance(files, Mapping):
+        raise TypeError("files must be a filename-to-content mapping.")
+    result: dict[str, str] = {}
+    for filename, content in files.items():
+        try:
+            _file_path(filename)
+        except ValueError as exc:
+            raise EditError(str(exc)) from None
+        if not isinstance(content, str):
+            raise TypeError(f"Contents for {filename} must be a string.")
+        result[filename] = content
+
+    for number, edit in enumerate(parse_edits(output), start=1):
+        if edit.filename not in result:
+            raise EditError(f"Edit {number}: file was not supplied: {edit.filename}.")
+        content = result[edit.filename]
+        if not edit.search:
+            if content:
+                raise EditError(f"Edit {number}: empty SEARCH requires an empty file: {edit.filename}.")
+            result[edit.filename] = edit.replacement
+            continue
+        start = content.find(edit.search)
+        if start < 0:
+            raise EditError(f"Edit {number}: SEARCH not found in {edit.filename}.")
+        # Count overlapping occurrences as ambiguous too (e.g. 'aa' in 'aaa').
+        if content.find(edit.search, start + 1) >= 0:
+            raise EditError(f"Edit {number}: SEARCH matches multiple locations in {edit.filename}.")
+        result[edit.filename] = content[:start] + edit.replacement + content[start + len(edit.search):]
+    return result
