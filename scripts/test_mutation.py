@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.mutation.mutation import CodeMutationEngine
 from agent.mutation.parser import EditError
+from agent.mutation.prompts import EditFeedback
 from agent.llm.client import LLMResponse, LLMError
 from agent.llm.mock_client import MockLLMClient
 
@@ -69,6 +70,36 @@ class MutationTests(unittest.TestCase):
         engine = self.engine(LLMResponse(edit("a.py", "one", "two"), "mock/model", None, "length", 1))
         with self.assertRaises(EditError):
             engine.mutate("Edit", {"a.py": "one"})
+
+    def test_correction_repeats_original_request_and_rejected_output(self):
+        files = {"a.py": "one"}
+        # A valid first edit followed by a failed match must be rolled back too.
+        rejected = edit("a.py", "one", "two") + edit("a.py", "missing", "three")
+        engine = self.engine(rejected, edit("a.py", "one", "three"), "NO_CHANGES")
+        with self.assertRaises(EditError) as caught:
+            engine.mutate("Change one to three", files)
+        self.assertEqual(files, {"a.py": "one"})
+        self.assertEqual(caught.exception.rejected_output, rejected)
+        feedback = EditFeedback(str(caught.exception), caught.exception.rejected_output)
+        result = engine.mutate("Change one to three", files, feedback=feedback)
+        self.assertEqual(result, {"a.py": "three"})
+        original, retry = engine.client.requests[:2]
+        self.assertEqual(retry.messages[:2], original.messages)
+        self.assertEqual(retry.messages[2], {"role": "assistant", "content": rejected})
+        self.assertIn(feedback.error, retry.messages[3]["content"])
+        self.assertIn("0 exact matches", retry.messages[3]["content"])
+        self.assertIn("No edits were applied", retry.messages[3]["content"])
+        self.assertIn("complete corrected response", retry.messages[3]["content"])
+        engine.mutate("Keep", result)
+        self.assertEqual(len(engine.client.requests[-1].messages), 2)
+
+    def test_truncation_preserves_response_for_correction(self):
+        output = edit("a.py", "one", "two")
+        engine = self.engine(LLMResponse(output, "mock", None, "length", 1))
+        with self.assertRaises(EditError) as caught:
+            engine.mutate("Edit", {"a.py": "one"})
+        self.assertEqual(caught.exception.rejected_output, output)
+        self.assertIn("truncated", str(caught.exception))
 
     def test_provider_errors_propagate(self):
         engine = self.engine(LLMError("Request failed"))

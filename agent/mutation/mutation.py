@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from agent.mutation.parser import EditError, apply_edits
-from agent.mutation.prompts import build_edit_messages
+from agent.mutation.prompts import EditFeedback, build_edit_messages
 from agent.llm.client import LLMClient, LLMResponse
 
 
@@ -42,22 +42,29 @@ class CodeMutationEngine:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        feedback: EditFeedback | None = None,
     ) -> dict[str, str]:
         """Return complete updated file contents, including unchanged files.
 
         Validate inputs before calling the LLM. Apply its edits to the same
         snapshot used in the prompt, leaving the caller's mapping untouched on
         both success and failure. NO_CHANGES returns an unchanged copy.
+        Optional feedback corrects the last rejection; this method still makes
+        only one request, leaving retry limits and persistence to the caller.
         """
         if not isinstance(files, Mapping):
             raise TypeError("files must be a filename-to-content mapping.")
         snapshot = dict(files)
-        messages = build_edit_messages(requirement, snapshot)
+        messages = build_edit_messages(requirement, snapshot, feedback=feedback)
         if self.client is None:
             self.client = LLMClient.from_env(profile="low")
         response = self.client.complete(messages, model=model, max_tokens=max_tokens)
         # A token-limited output may end after one valid block while omitting
         # other required edits. Do not mistake that partial response for success.
-        if response.finish_reason in {"length", "max_tokens", "content_filter"}:
-            raise EditError("LLM output was truncated or filtered; no edits were applied.")
-        return apply_edits(snapshot, response.text)
+        try:
+            if response.finish_reason in {"length", "max_tokens", "content_filter"}:
+                raise EditError("LLM output was truncated or filtered; no edits were applied.")
+            return apply_edits(snapshot, response.text)
+        except EditError as exc:
+            exc.rejected_output = response.text
+            raise

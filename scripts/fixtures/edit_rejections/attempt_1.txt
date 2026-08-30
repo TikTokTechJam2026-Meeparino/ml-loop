@@ -1,0 +1,109 @@
+FILE: model.py
+```python
+    def step(self, X, y):
+        B = len(y)
+        z, E, S = self.logits(X)
+        g = ((sigmoid(z) - y) / B).astype(np.float32)    # (B,)
+        gV = np.zeros_like(self.V); gW = np.zeros_like(self.W)
+        np.add.at(gW, X, g[:, None])
+        np.add.at(gV, X, g[:, None, None] * (S[:, None, :] - E))
+        gV += self.l2 * self.V; gW += self.l2 * self.W
+        self.t += 1
+        b1, b2, eps = 0.9, 0.999, 1e-8
+        for P, G, M, Vv in ((self.V, gV, self.mV, self.vV), (self.W, gW, self.mW, self.vW)):
+            M *= b1; M += (1 - b1) * G
+            Vv *= b2; Vv += (1 - b2) * (G * G)
+            P -= self.lr * (M / (1 - b1 ** self.t)) / (np.sqrt(Vv / (1 - b2 ** self.t)) + eps)
+        self.b -= self.lr * g.sum()
+        return float(-np.mean(y * np.log(sigmoid(z) + 1e-9) + (1 - y) * np.log(1 - sigmoid(z) + 1e-9)))
+
+    def predict(self, X, bs=200_000):
+```
+=======
+    def step(self, X, y):
+        B = len(y)
+        z, E, S = self.logits(X)
+        g = ((sigmoid(z) - y) / B).astype(np.float32)    # (B,)
+        gV = np.zeros_like(self.V); gW = np.zeros_like(self.W)
+        np.add.at(gW, X, g[:, None])
+        np.add.at(gV, X, g[:, None, None] * (S[:, None, :] - E))
+        gV += self.l2 * self.V; gW += self.l2 * self.W
+        self.t += 1
+        b1, b2, eps = 0.9, 0.999, 1e-8
+        for P, G, M, Vv in ((self.V, gV, self.mV, self.vV), (self.W, gW, self.mW, self.vW)):
+            M *= b1; M += (1 - b1) * G
+            Vv *= b2; Vv += (1 - b2) * (G * G)
+            P -= self.lr * (M / (1 - b1 ** self.t)) / (np.sqrt(Vv / (1 - b2 ** self.t)) + eps)
+        self.b -= self.lr * g.sum()
+        return float(-np.mean(y * np.log(sigmoid(z) + 1e-9) + (1 - y) * np.log(1 - sigmoid(z) + 1e-9)))
+
+    def step_pairwise(self, X_positive, X_negative):
+        B = len(X_positive)
+        z_positive, E_positive, S_positive = self.logits(X_positive)
+        z_negative, E_negative, S_negative = self.logits(X_negative)
+        d = z_positive - z_negative
+        g = (sigmoid(-d) / B).astype(np.float32)
+
+        gV = np.zeros_like(self.V); gW = np.zeros_like(self.W)
+        np.add.at(gW, X_positive, g[:, None])
+        np.add.at(gW, X_negative, -g[:, None])
+        np.add.at(gV, X_positive, g[:, None, None] * (S_positive[:, None, :] - E_positive))
+        np.add.at(gV, X_negative, -g[:, None, None] * (S_negative[:, None, :] - E_negative))
+        gV += self.l2 * self.V; gW += self.l2 * self.W
+
+        self.t += 1
+        b1, b2, eps = 0.9, 0.999, 1e-8
+        for P, G, M, Vv in ((self.V, gV, self.mV, self.vV), (self.W, gW, self.mW, self.vW)):
+            M *= b1; M += (1 - b1) * G
+            Vv *= b2; Vv += (1 - b2) * (G * G)
+            P -= self.lr * (M / (1 - b1 ** self.t)) / (np.sqrt(Vv / (1 - b2 ** self.t)) + eps)
+        return float(np.mean(np.logaddexp(0, -d)))
+
+    def predict(self, X, bs=200_000):
+>>>>>>> REPLACE
+```
+
+FILE: train.py
+```python
+    Xtr = transform(train_rows, features)
+    ytr = np.asarray([r[6] for r in train_rows], dtype=np.float32)
+    Xva = transform(valid_rows, features)
+    for epoch in range(epoch + 1, config['epochs'] + 1):
+        if bad >= config['patience']:
+            break
+        order = rng.permutation(len(ytr))
+        losses = [model.step(Xtr[order[i:i + config['bs']]], ytr[order[i:i + config['bs']]])
+                  for i in range(0, len(order), config['bs'])]
+        validation = evaluate([r[1] for r in valid_rows], [r[6] for r in valid_rows], model.predict(Xva))
+```
+=======
+    Xtr = transform(train_rows, features)
+    ytr = np.asarray([r[6] for r in train_rows], dtype=np.float32)
+    user_labels = {}
+    for index, row in enumerate(train_rows):
+        user_labels.setdefault(row[1], {0: [], 1: []})[int(row[6])].append(index)
+    valid_users = {user: groups for user, groups in user_labels.items()
+                   if groups[1] and groups[0]}
+    if not valid_users:
+        raise ValueError('no training users have both a positive and a negative row')
+    Xva = transform(valid_rows, features)
+    for epoch in range(epoch + 1, config['epochs'] + 1):
+        if bad >= config['patience']:
+            break
+        positive_indices = []
+        negative_indices = []
+        for groups in valid_users.values():
+            negatives = np.asarray(groups[0], dtype=np.int64)
+            for positive in groups[1]:
+                positive_indices.append(positive)
+                negative_indices.append(negatives[rng.integers(len(negatives))])
+        pair_order = rng.permutation(len(positive_indices))
+        positive_indices = np.asarray(positive_indices, dtype=np.int64)[pair_order]
+        negative_indices = np.asarray(negative_indices, dtype=np.int64)[pair_order]
+        losses = [model.step_pairwise(
+                      Xtr[positive_indices[i:i + config['bs']]],
+                      Xtr[negative_indices[i:i + config['bs']]])
+                  for i in range(0, len(pair_order), config['bs'])]
+        validation = evaluate([r[1] for r in valid_rows], [r[6] for r in valid_rows], model.predict(Xva))
+>>>>>>> REPLACE
+```

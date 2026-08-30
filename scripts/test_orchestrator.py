@@ -1,11 +1,12 @@
 """Offline lifecycle tests using real Git and deterministic LLM/runner doubles."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,6 +26,11 @@ if REAL_RUNNER:
 SPLITS = {"train": [[1, 1, 1, 1, 1, 1, 0]], "valid": [[2, 1, 1, 1, 1, 1, 1]],
           "test": [[3, 1, 1, 1, 1, 1, 0]]}
 PROPOSAL = '{"requirement": "Increase capacity in model.py"}'
+
+
+def rejected_fixture(attempt):
+    return (Path(__file__).parent / "fixtures" / "edit_rejections" /
+            f"attempt_{attempt}.txt").read_text(encoding="utf-8")
 
 
 def edit(old, new):
@@ -173,6 +179,126 @@ class OrchestratorTests(unittest.TestCase):
                 self.assertEqual(report["candidate_status_counts"], {"failed": 1})
                 self.assertEqual(report["selected_node_id"], "genesis")
                 self.assertEqual(len(runner.calls), 2)
+
+    def test_logged_rejections_get_corrective_retry_and_apply_only_correction(self):
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                self.config = replace(self.config, run_dir=str(self.run_dir / str(attempt)))
+                rejected = rejected_fixture(attempt)
+                obj, client, runner = self.run_with(
+                    [PROPOSAL, rejected, edit("dim=16", "dim=32")], [.5, .6, .55])
+                source = (Path(self.config.template_dir) / "model.py").read_bytes().decode("utf-8")
+                original = obj._edit_rejected
+                def inspect_rejection(exc):
+                    original(exc)
+                    state, _, _ = obj.store.load()
+                    self.assertEqual(state["files"]["model.py"], source)
+                    self.assertEqual(obj.git.read_active_files(["model.py"])["model.py"], source)
+                    self.assertEqual(state["edit_retry"]["rejected_output"], rejected)
+                    self.assertEqual(len(runner.calls), 1)
+                obj._edit_rejected = inspect_rejection
+                report = obj.run()
+                self.assertEqual(report["selected_node_id"], "node_001")
+                self.assertEqual(report["llm_calls"], 3)
+                first, retry = client.requests[1:]
+                self.assertEqual(retry.messages[:2], first.messages)
+                self.assertEqual(retry.messages[2], {"role": "assistant", "content": rejected})
+                self.assertIn("Missing marker lines", retry.messages[3]["content"])
+                self.assertEqual(obj.git.read_active_files(["model.py"])["model.py"], source.replace("16", "32"))
+                state, _, _ = obj.store.load()
+                self.assertNotIn("edit_retry", state)
+                self.assertEqual(len(runner.calls), 3)
+
+    def test_rejection_feedback_survives_restart(self):
+        rejected = rejected_fixture(1)
+        obj, client, runner = self.run_with([PROPOSAL, rejected], [.5, .6, .55])
+        original = obj._edit_rejected
+        def interrupt(exc):
+            original(exc)
+            raise KeyboardInterrupt()
+        obj._edit_rejected = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            obj.run()
+        state, _, _ = obj.store.load()
+        self.assertEqual(state["attempts"]["mutation"], 1)
+        resumed_client = MockLLMClient([edit("dim=16", "dim=32")])
+        report = Orchestrator.resume(self.run_dir, client=resumed_client, runner=runner, splits=SPLITS)
+        messages = resumed_client.requests[0].messages
+        self.assertEqual(messages[:2], client.requests[1].messages)
+        self.assertEqual(messages[2]["content"], rejected)
+        self.assertIn(state["edit_retry"]["error"], messages[3]["content"])
+        self.assertEqual(report["llm_calls"], 3)
+
+    def test_repeated_rejections_stop_at_limit_and_do_not_leak_to_next_candidate(self):
+        self.config = replace(self.config, search=SearchConfig(max_iterations=2))
+        obj, client, runner = self.run_with(
+            [PROPOSAL, rejected_fixture(1), rejected_fixture(2), PROPOSAL, edit("dim=16", "dim=32")],
+            [.5, .6, .55])
+        report = obj.run()
+        self.assertEqual(report["candidate_status_counts"], {"failed": 1, "success": 1})
+        self.assertEqual(len(client.requests), 5)
+        self.assertEqual(len(client.requests[2].messages), 4)
+        self.assertEqual(len(client.requests[4].messages), 2)
+        self.assertEqual(len(runner.calls), 3)
+
+    def test_repair_format_failure_gets_feedback_then_clears_for_new_source(self):
+        rejected = edit("dim=32", "dim=24").replace("<<<<<<< SEARCH\n", "")
+        obj, client, runner = self.run_with(
+            [PROPOSAL, edit("dim=16", "dim=32"), rejected,
+             edit("dim=32", "dim=24"), edit("dim=24", "dim=20")],
+            [.5, None, None, .6, .55])
+        report = obj.run()
+        self.assertEqual(report["selected_node_id"], "node_001")
+        self.assertEqual(client.requests[3].messages[:2], client.requests[2].messages)
+        self.assertEqual(client.requests[3].messages[2]["content"], rejected)
+        self.assertEqual(len(client.requests[4].messages), 2)
+        self.assertIn("dim=24", client.requests[4].messages[1]["content"])
+        self.assertEqual(len(runner.calls), 5)
+
+    def test_retry_context_is_redacted_before_checkpoint_and_replay(self):
+        secret = "fixture-sensitive-value-123"
+        rejected = "malformed output " + secret
+        obj, client, _ = self.run_with([PROPOSAL, rejected, edit("dim=16", "dim=32")], [.5, .6, .55])
+        with patch.dict("os.environ", {"TEST_API_KEY": secret}):
+            obj.run()
+        self.assertEqual(client.requests[2].messages[2]["content"], "malformed output [REDACTED]")
+        for path in obj.directory.glob("snapshots/*/state.json"):
+            self.assertNotIn(secret, path.read_text(encoding="utf-8"))
+
+    def test_correction_still_obeys_model_call_limit(self):
+        self.config = replace(self.config, max_llm_calls=2)
+        obj, client, runner = self.run_with([PROPOSAL, rejected_fixture(1)], [.5, .4])
+        report = obj.run()
+        self.assertEqual(report["llm_calls"], 2)
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(len(runner.calls), 2)
+
+    def test_third_attempt_uses_latest_rejection_without_growing_history(self):
+        self.config = replace(self.config, mutation_attempts=3)
+        obj, client, _ = self.run_with(
+            [PROPOSAL, rejected_fixture(1), rejected_fixture(2), edit("dim=16", "dim=32")],
+            [.5, .6, .55])
+        obj.run()
+        messages = client.requests[3].messages
+        self.assertEqual(len(messages), 4)
+        self.assertEqual(messages[:2], client.requests[1].messages)
+        self.assertEqual(messages[2]["content"], rejected_fixture(2))
+        self.assertIn("found ['=======']", messages[3]["content"])
+
+    def test_oversized_correction_does_not_bypass_prompt_budget(self):
+        obj, client, runner = self.run_with([PROPOSAL, rejected_fixture(1)], [.5])
+        original = obj._edit_rejected
+        def limit_retry(exc):
+            original(exc)
+            obj.client.max_prompt_chars = sum(len(m["content"]) for m in client.requests[-1].messages)
+        obj._edit_rejected = limit_retry
+        with self.assertRaisesRegex(ValueError, "Prompt exceeds configured character budget"):
+            obj.run()
+        state, _, _ = obj.store.load()
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(state["attempts"]["mutation"], 1)
+        self.assertEqual(state["edit_retry"]["rejected_output"], rejected_fixture(1))
 
     def test_completed_evaluation_recovered_without_retraining(self):
         obj, client, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, .6, .55])

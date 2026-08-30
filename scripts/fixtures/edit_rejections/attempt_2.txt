@@ -1,0 +1,72 @@
+FILE: model.py
+```python
+    def predict(self, X, bs=200_000):
+        return np.concatenate([self.logits(X[i:i + bs])[0] for i in range(0, len(X), bs)])
+=======
+    def step_pair(self, X_positive, X_negative):
+        B = len(X_positive)
+        zp, Ep, Sp = self.logits(X_positive)
+        zn, En, Sn = self.logits(X_negative)
+        d = zp - zn
+        g = (sigmoid(-d) / B).astype(np.float32)
+        gV = np.zeros_like(self.V); gW = np.zeros_like(self.W)
+        np.add.at(gW, X_positive, g[:, None])
+        np.add.at(gW, X_negative, -g[:, None])
+        np.add.at(gV, X_positive, g[:, None, None] * (Sp[:, None, :] - Ep))
+        np.add.at(gV, X_negative, -g[:, None, None] * (Sn[:, None, :] - En))
+        gV += self.l2 * self.V; gW += self.l2 * self.W
+        self.t += 1
+        b1, b2, eps = 0.9, 0.999, 1e-8
+        for P, G, M, Vv in ((self.V, gV, self.mV, self.vV), (self.W, gW, self.mW, self.vW)):
+            M *= b1; M += (1 - b1) * G
+            Vv *= b2; Vv += (1 - b2) * (G * G)
+            P -= self.lr * (M / (1 - b1 ** self.t)) / (np.sqrt(Vv / (1 - b2 ** self.t)) + eps)
+        return float(np.mean(np.logaddexp(0, -d)))
+
+    def predict(self, X, bs=200_000):
+        return np.concatenate([self.logits(X[i:i + bs])[0] for i in range(0, len(X), bs)])
+```
+
+FILE: train.py
+```python
+    Xtr = transform(train_rows, features)
+    ytr = np.asarray([r[6] for r in train_rows], dtype=np.float32)
+    Xva = transform(valid_rows, features)
+    for epoch in range(epoch + 1, config['epochs'] + 1):
+        if bad >= config['patience']:
+            break
+        order = rng.permutation(len(ytr))
+        losses = [model.step(Xtr[order[i:i + config['bs']]], ytr[order[i:i + config['bs']]])
+                  for i in range(0, len(order), config['bs'])]
+        validation = evaluate([r[1] for r in valid_rows], [r[6] for r in valid_rows], model.predict(Xva))
+=======
+    Xtr = transform(train_rows, features)
+    labels = np.asarray([r[6] for r in train_rows], dtype=np.float32)
+    users = {}
+    for index, (row, label) in enumerate(zip(train_rows, labels)):
+        user = row[1]
+        group = users.setdefault(user, [[], []])
+        group[int(label > 0)].append(index)
+    valid_groups = [(positive, negative) for positive, negative in users.values()
+                    if positive and negative]
+    if not valid_groups:
+        raise ValueError('no valid training users with both positive and negative rows')
+    positive_indices = np.asarray([index for positive, _ in valid_groups for index in positive], dtype=np.int32)
+    positive_users = [negative for _, negative in valid_groups
+                      for _ in range(len(_))]  # placeholder
+    negative_pools = []
+    for positive, negative in valid_groups:
+        negative_pools.extend([negative] * len(positive))
+    Xva = transform(valid_rows, features)
+    for epoch in range(epoch + 1, config['epochs'] + 1):
+        if bad >= config['patience']:
+            break
+        negative_indices = np.asarray(
+            [pool[rng.integers(len(pool))] for pool in negative_pools], dtype=np.int32)
+        pair_order = rng.permutation(len(positive_indices))
+        losses = [model.step_pair(
+                      Xtr[positive_indices[pair_order[i:i + config['bs']]]],
+                      Xtr[negative_indices[pair_order[i:i + config['bs']]]])
+                  for i in range(0, len(pair_order), config['bs'])]
+        validation = evaluate([r[1] for r in valid_rows], [r[6] for r in valid_rows], model.predict(Xva))
+```

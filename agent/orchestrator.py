@@ -11,6 +11,7 @@ import time
 import uuid
 
 from agent.budget import BudgetClient, BudgetExhausted, RunBudget
+from agent.diagnostics import sanitize
 from agent.graph.memory import ExplorationMemory, MemoryContext
 from agent.graph.node import EdgeAction, MetricResult, NodeStatus, RecoveryEvent, SearchNode
 from agent.graph.reflection import ReflectionEngine
@@ -20,6 +21,7 @@ from agent.llm.client import LLMError
 from agent.log import RunLogger
 from agent.mutation.mutation import CodeMutationEngine
 from agent.mutation.parser import EditError
+from agent.mutation.prompts import EditFeedback
 from agent.recovery import RecoveryEngine
 from agent.reporting import FinalTestResult, build_report, write_report
 from agent.run_state import RunStore
@@ -197,8 +199,25 @@ class Orchestrator:
                          stage=stage, node_id=self.state.get("active"), **details)
 
     def _stage(self, stage):
+        if stage != self.state["stage"]:
+            self.state.pop("edit_retry", None)
         self.state["stage"] = stage
         self._save("stage_entered")
+
+    def _edit_feedback(self):
+        saved = self.state.get("edit_retry")
+        return EditFeedback(**saved) if saved is not None else None
+
+    def _edit_rejected(self, exc):
+        # Keep the latest rejection across restarts without persisting credentials.
+        # The source snapshot is untouched, so a correction must repeat all edits.
+        config = getattr(self.client.client, "config", None)
+        self.state["edit_retry"] = sanitize(
+            asdict(EditFeedback(str(exc), exc.rejected_output)),
+            (getattr(config, "api_key", ""),),
+        ) if exc.rejected_output else None
+        self._save("edit_output_rejected")
+        self._audit("output.rejected", error=exc)
 
     def run(self):
         with self.store.lock():
@@ -432,9 +451,10 @@ class Orchestrator:
         self._save("attempt_reserved")
         try:
             files = self.mutation.mutate(self._node().incoming_edge.hypothesis, self.state["files"],
-                                          max_tokens=self.config.mutation_tokens)
+                                          max_tokens=self.config.mutation_tokens,
+                                          feedback=self._edit_feedback())
         except EditError as exc:
-            self._audit("output.rejected", error=exc)
+            self._edit_rejected(exc)
             return
         except BudgetExhausted:
             self._fail("Model or time budget exhausted during mutation")
@@ -512,9 +532,9 @@ class Orchestrator:
         try:
             proposal = recovery.propose(self.state["files"], hypothesis=self._node().incoming_edge.hypothesis,
                 diagnostics=self.state["diagnostic"], constraints=CONSTRAINTS,
-                max_tokens=self.config.mutation_tokens)
+                max_tokens=self.config.mutation_tokens, feedback=self._edit_feedback())
         except EditError as exc:
-            self._audit("output.rejected", error=exc)
+            self._edit_rejected(exc)
             return
         except BudgetExhausted:
             self._fail(self.state["diagnostic"])
@@ -526,7 +546,9 @@ class Orchestrator:
             self._node().recovery_events.pop()
             self._save("attempt_released", attempt=len(self._node().recovery_events) + 1)
             raise
+        self.state.pop("edit_retry", None)
         if proposal is None:
+            self._save("repair_no_changes")
             return
         self._node().recovery_events[-1] = replace(self._node().recovery_events[-1],
                                                    raw_diff=proposal.raw_diff, tokens_used=self.client.last_usage)

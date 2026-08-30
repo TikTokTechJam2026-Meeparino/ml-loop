@@ -12,6 +12,10 @@ from agent.mutation.prompts import _file_path
 class EditError(ValueError):
     """Malformed output or an edit that cannot be applied unambiguously."""
 
+    def __init__(self, message: str, *, rejected_output: str | None = None):
+        super().__init__(message)
+        self.rejected_output = rejected_output
+
 
 @dataclass(frozen=True)
 class CodeEdit:
@@ -30,6 +34,17 @@ _BLOCK = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 _MARKER = re.compile(r"^(<<<<<<< SEARCH|=======|>>>>>>> REPLACE)(?:\r?\n|\Z)", re.MULTILINE)
+_EXPECTED_MARKERS = ["<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"]
+
+
+def _frame_error(fragment: str, number: int) -> EditError:
+    header = re.search(r"^FILE: ([^\r\n]+)", fragment, re.MULTILINE)
+    location = f"Block {number}" + (f" ({header.group(1)})" if header else "")
+    return EditError(
+        f"{location}: unexpected text or incomplete FILE/code-fence frame. "
+        "Expected FILE: path, an opening code fence, all three SEARCH/REPLACE "
+        "markers inside it, and a matching closing fence; no surrounding prose."
+    )
 
 
 def _payload(text: str) -> str:
@@ -58,25 +73,42 @@ def parse_edits(output: str) -> list[CodeEdit]:
     position = 0
     for block in _BLOCK.finditer(output):
         if output[position:block.start()].strip():
-            raise EditError("Unexpected text or malformed edit before a FILE block.")
+            raise _frame_error(output[position:block.start()], len(edits) + 1)
         filename = block.group("filename")
+        location = f"Block {len(edits) + 1} ({filename})"
         try:
             _file_path(filename)
         except ValueError as exc:
-            raise EditError(str(exc)) from None
+            raise EditError(f"{location}: {exc}") from None
         body = block.group("body")
         markers = list(_MARKER.finditer(body))
+        found = [m.group(1) for m in markers]
         if (
             len(markers) != 3
-            or [m.group(1) for m in markers] != ["<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"]
+            or found != _EXPECTED_MARKERS
             or markers[0].start() != 0
             or markers[-1].end() != len(body)
         ):
-            raise EditError(f"Malformed SEARCH/REPLACE markers in {filename}.")
+            missing = [marker for marker in _EXPECTED_MARKERS if marker not in found]
+            problems = []
+            if missing:
+                problems.append(f"Missing marker lines: {', '.join(missing)}.")
+                problems.append("Closing code fence reached before all required markers; "
+                                "keep SEARCH, separator, and REPLACE inside one fence.")
+            elif found != _EXPECTED_MARKERS:
+                problems.append("Markers are duplicated or out of order.")
+            else:
+                problems.append("<<<<<<< SEARCH must be the first line inside the fence, "
+                                "and >>>>>>> REPLACE must be the last.")
+            raise EditError(
+                f"{location}: {' '.join(problems)} "
+                f"Expected exactly {_EXPECTED_MARKERS!r}; found {found!r} inside the fence. "
+                "Marker lines must have no indentation or trailing spaces."
+            )
         # A closing fence of this length inside the body violates the framing.
         fence = block.group("fence")
         if re.search(r"(?m)^`{" + str(len(fence)) + r",}[^\S\r\n]*\r?$", body):
-            raise EditError(f"Use a longer outer code fence for {filename}.")
+            raise EditError(f"{location}: use a longer outer code fence.")
         edits.append(CodeEdit(
             filename,
             _payload(body[markers[0].end():markers[1].start()]),
@@ -84,7 +116,7 @@ def parse_edits(output: str) -> list[CodeEdit]:
         ))
         position = block.end()
     if not edits or output[position:].strip():
-        raise EditError("Expected only complete FILE/SEARCH/REPLACE blocks or NO_CHANGES.")
+        raise _frame_error(output[position:], len(edits) + 1)
     return edits
 
 
@@ -118,9 +150,12 @@ def apply_edits(files: Mapping[str, str], output: str) -> dict[str, str]:
             continue
         start = content.find(edit.search)
         if start < 0:
-            raise EditError(f"Edit {number}: SEARCH not found in {edit.filename}.")
+            raise EditError(f"Edit {number}: SEARCH not found in {edit.filename} (0 exact matches). "
+                            "Copy SEARCH verbatim, including whitespace and line endings, from the "
+                            "supplied source after earlier edits in this response.")
         # Count overlapping occurrences as ambiguous too (e.g. 'aa' in 'aaa').
         if content.find(edit.search, start + 1) >= 0:
-            raise EditError(f"Edit {number}: SEARCH matches multiple locations in {edit.filename}.")
+            raise EditError(f"Edit {number}: SEARCH matches multiple locations in {edit.filename}. "
+                            "Expected exactly one match; include more unchanged surrounding context.")
         result[edit.filename] = content[:start] + edit.replacement + content[start + len(edit.search):]
     return result

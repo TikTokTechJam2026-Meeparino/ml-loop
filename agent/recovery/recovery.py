@@ -6,7 +6,7 @@ from difflib import unified_diff
 
 from agent.graph.node import RecoveryEvent
 from agent.mutation.mutation import CodeMutationEngine
-from agent.mutation.prompts import build_edit_messages
+from agent.mutation.prompts import EditFeedback, build_edit_messages
 from agent.recovery.prompts import repair_requirement
 
 
@@ -61,7 +61,8 @@ class RecoveryEngine:
 
     def propose(self, files: Mapping[str, str], *, hypothesis: str, diagnostics: str,
                 constraints: str, model: str | None = None,
-                max_tokens: int | None = None) -> RepairProposal | None:
+                max_tokens: int | None = None,
+                feedback: EditFeedback | None = None) -> RepairProposal | None:
         """Return repaired files, or None for NO_CHANGES (a failed attempt).
 
         Provider/edit errors propagate after recording a failed attempt. Invalid
@@ -79,7 +80,8 @@ class RecoveryEngine:
         build_edit_messages(requirement, snapshot)
         attempt = len(self._events) + 1
         try:
-            updated = self.mutation.mutate(requirement, snapshot, model=model, max_tokens=max_tokens)
+            updated = self.mutation.mutate(requirement, snapshot, model=model, max_tokens=max_tokens,
+                                           feedback=feedback)
         except Exception:
             self._events.append(RecoveryEvent(attempt, diagnostics, False))
             raise

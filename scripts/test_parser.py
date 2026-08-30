@@ -1,6 +1,7 @@
 """Offline parser checks: python scripts/test_parser.py."""
 
 import sys
+import re
 import unittest
 from pathlib import Path
 
@@ -66,6 +67,33 @@ class ParserTests(unittest.TestCase):
         for filename in ["../a.py", "/a.py", "C:/a.py", "a/../b.py"]:
             with self.subTest(filename=filename), self.assertRaises(EditError):
                 parse_edits(block(filename, "x", "y"))
+
+    def test_logged_rejections_identify_missing_markers_and_fence(self):
+        fixtures = Path(__file__).parent / "fixtures" / "edit_rejections"
+        for attempt in (1, 2):
+            output = (fixtures / f"attempt_{attempt}.txt").read_text(encoding="utf-8")
+            with self.subTest(attempt=attempt), self.assertRaises(EditError) as caught:
+                parse_edits(output)
+            message = str(caught.exception)
+            self.assertIn("Block 1 (model.py)", message)
+            self.assertIn("Missing marker lines: <<<<<<< SEARCH", message)
+            self.assertIn(">>>>>>> REPLACE", message)
+            self.assertIn("Closing code fence reached before all required markers", message)
+            expected_found = "found []" if attempt == 1 else "found ['=======']"
+            self.assertIn(expected_found, message)
+
+    def test_marker_position_order_and_frame_diagnostics(self):
+        valid = block("a.py", "x", "y")
+        cases = [
+            (valid.replace("<<<<<<< SEARCH", "=======\n<<<<<<< SEARCH"), "duplicated or out of order"),
+            (valid.replace("<<<<<<< SEARCH", "extra\n<<<<<<< SEARCH"), "first line"),
+            (valid.replace(">>>>>>> REPLACE", ">>>>>>> REPLACE\nextra"), "last"),
+            (valid + "FILE: broken.py\n```python\n", "Block 2 (broken.py)"),
+            (valid + block("b.py", "x", "y").replace("<<<<<<< SEARCH\n", ""), "Block 2 (b.py)"),
+        ]
+        for output, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(EditError, re.escape(message)):
+                parse_edits(output)
 
     def test_long_fences_and_marker_like_code(self):
         source = 'example = "```"\nmarker = "======="'
