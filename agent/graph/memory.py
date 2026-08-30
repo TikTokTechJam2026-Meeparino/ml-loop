@@ -103,6 +103,47 @@ def error_signature(stderr: str) -> str:
     return _line(signature, 500)
 
 
+def _branch_scope(insight, context, nodes, selected_parent_id):
+    """Describe provenance using the current run's tree, never matching IDs across runs."""
+    if insight.context.run_id != context.run_id:
+        return 'relationship=other_run; source_parent_history=unavailable'
+    def chain(node_id):
+        path, seen = [], set()
+        while node_id is not None:
+            if node_id in seen or node_id not in nodes:
+                return None
+            seen.add(node_id)
+            node = nodes[node_id]
+            path.append(node)
+            node_id = node.parent_id
+        return list(reversed(path))
+    selected = chain(selected_parent_id)
+    source = chain(insight.parent_id)
+    source_node = nodes.get(insight.node_id)
+    if (not selected or not source or source_node is None
+            or source_node.parent_id != insight.parent_id
+            or source[-1].git_commit_sha != insight.parent_commit_sha):
+        return 'relationship=unknown; source_parent_history=unavailable'
+    if insight.parent_id == selected_parent_id:
+        relationship = 'same_parent'
+    elif insight.node_id in {n.node_id for n in selected}:
+        relationship = 'ancestor'
+    elif selected_parent_id in {n.node_id for n in source}:
+        relationship = 'descendant'
+    else:
+        relationship = 'other_branch'
+    # Keep a bounded description; identify omitted ancestors instead of implying
+    # this is the complete implementation or that a historical change persists.
+    path = ' -> '.join(n.node_id for n in source)
+    changes = [f'{n.node_id}: {_line(n.incoming_edge.hypothesis, 120)}'
+               for n in source if n.incoming_edge is not None]
+    history = '; '.join(changes[-3:]) or 'genesis baseline (no incoming changes)'
+    if len(changes) > 3:
+        history = f'{len(changes) - 3} earlier changes omitted; ' + history
+    return (f'relationship={relationship}; source_parent_path={_line(path, 240)}; '
+            f'source_parent_history={history}')
+
+
 class ExplorationMemory:
     """One immutable evidence snapshot per (run_id, node_id).
 
@@ -238,13 +279,17 @@ class ExplorationMemory:
     def prompt_summary(self, context: MemoryContext, *, parent_commit_sha: str | None = None,
                        max_items: int = 6, max_chars: int = 2400,
                        max_tokens: int | None = None,
-                       token_counter: Callable[[str], int] | None = None) -> str:
+                       token_counter: Callable[[str], int] | None = None,
+                       nodes: dict[str, SearchNode] | None = None,
+                       selected_parent_id: str | None = None) -> str:
         """Build bounded advisory text, never including raw diffs or tracebacks.
 
         max_chars always applies. For an exact model token cap, supply both
         max_tokens and that model's token_counter; no chars/token guess is used.
         The budget includes the header and newlines. Whole entries are omitted
         if they cannot fit, and an empty string is returned if none fit.
+        Supplying nodes and selected_parent_id adds current-run branch provenance
+        and up to three recent source-parent changes; stored insights are unchanged.
         """
         if type(max_chars) is not int or max_chars < 0:
             raise ValueError("max_chars must be a nonnegative integer")
@@ -261,10 +306,13 @@ class ExplorationMemory:
                         else f"{insight.delta:+.4f} Primary vs parent")
             if insight.reflection:
                 evidence += f"; model reflection: {_line(insight.reflection)}"
-            scope = f"subsystem={_line(insight.context.subsystem, 60)}, parent={_line(insight.parent_commit_sha, 12)}"
+            scope = f"subsystem={_line(insight.context.subsystem, 60)}, parent_commit={_line(insight.parent_commit_sha, 12)}"
             configuration = json.dumps(insight.context.configuration, sort_keys=True, ensure_ascii=False)
             scope += f", config={_line(configuration, 160)}"
-            entry = (f"- [{label}] {_line(insight.context.run_id, 40)}/{_line(insight.node_id, 40)} "
+            if nodes is not None and selected_parent_id is not None:
+                scope += '; ' + _branch_scope(insight, context, nodes, selected_parent_id)
+            entry = (f"- [{label}] {_line(insight.context.run_id, 40)}/"
+                     f"{_line(insight.parent_id, 40)} -> {_line(insight.node_id, 40)} "
                      f"({_line(insight.label, 60)}): {_line(insight.hypothesis)} -> {evidence}. [{scope}]")
             proposed = summary + "\n" + entry
             if fits(proposed):

@@ -699,6 +699,18 @@ Blank optional settings use code defaults; blank API_BASE selects the provider d
 The template sets high/low reasoning and a 180-second high-profile timeout.
 Model fields are blank until you choose explicit LiteLLM provider/model IDs.
 
+Improvement memory summaries identify each learning's source parent and child.
+For records verified against the current tree, they also identify the relationship
+to the selected parent (`same_parent`, `ancestor`, `descendant`, or `other_branch`),
+the source parent's ancestry path, and up to three recent historical changes.
+Missing or incompatible ancestry is marked `unknown`; records from other runs
+are marked `other_run`, even if node names coincide. History can be abbreviated
+and whole entries omitted to respect the existing prompt budget. These summaries
+describe historical changes, not a complete reconstruction of source code.
+The improvement prompt permits transferring a change between materially different
+parent code states while discouraging equivalent sibling experiments. This is
+prompt guidance, not a deterministic duplicate filter.
+
 Clients are cached per profile and share the run's existing call and time
 budgets. Model-request diagnostic artifacts record the selected profile, model,
 and reasoning effort. Explicit injected clients still override environment

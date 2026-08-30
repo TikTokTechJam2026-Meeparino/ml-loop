@@ -389,12 +389,15 @@ class Orchestrator:
             return
         self._restore(self._parent().git_commit_sha)
         files = self.git.read_active_files(FILES)
-        siblings = [dict(node_id=n.node_id, hypothesis=n.incoming_edge.hypothesis,
+        siblings = [dict(node_id=n.node_id, parent_id=n.parent_id, relationship='same_parent', hypothesis=n.incoming_edge.hypothesis,
                          status=n.status.value, metrics=asdict(n.metrics) if n.metrics else None)
                     for n in (self.tree.nodes[i] for i in self._parent().children_ids)
                     if n.node_id != self.state["active"]]
-        context = json.dumps({"siblings": siblings, "remaining_seconds": self.budget.remaining(),
-                              "memory": self.memory.prompt_summary(self._context())})
+        context = json.dumps({"selected_parent_id": self._parent().node_id,
+                              "siblings": siblings, "remaining_seconds": self.budget.remaining(),
+                              "memory": self.memory.prompt_summary(self._context(),
+                                  parent_commit_sha=self._parent().git_commit_sha,
+                                  nodes=self.tree.nodes, selected_parent_id=self._parent().node_id)})
         self.state["attempts"]["proposal"] += 1
         self._save("attempt_reserved")
         try:

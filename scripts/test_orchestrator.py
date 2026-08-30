@@ -97,6 +97,22 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(tree.iteration_count, 1)
         self.assertEqual(len(memory.insights), 1)
 
+    def test_improvement_receives_sibling_and_memory_provenance(self):
+        from dataclasses import replace
+        self.config = replace(self.config, search=SearchConfig(max_iterations=2))
+        obj, client, _ = self.run_with(
+            [PROPOSAL, edit("dim=16", "dim=32"), PROPOSAL, edit("dim=16", "dim=24")],
+            [.5, .6, .55, .6])
+        obj.run()
+        prompt = client.requests[2].messages[1]['content']
+        payload = json.loads(prompt.split('EXPERIMENT EVIDENCE (JSON)\n', 1)[1].split('\n\n', 1)[0])
+        context = json.loads(payload['additional_context'])
+        self.assertEqual(context['selected_parent_id'], 'genesis')
+        self.assertEqual(context['siblings'][0]['parent_id'], 'genesis')
+        self.assertEqual(context['siblings'][0]['relationship'], 'same_parent')
+        self.assertIn('genesis -> node_001', context['memory'])
+        self.assertIn('relationship=same_parent', context['memory'])
+
     def test_repair_and_reflection_handoff(self):
         from dataclasses import replace
         self.config = replace(self.config, reflection_enabled=True)

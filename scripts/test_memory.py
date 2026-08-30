@@ -104,6 +104,37 @@ class MemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.memory.prompt_summary(self.context, max_tokens=20)
 
+    def test_branch_provenance_and_transfer_context(self):
+        branch_a = SearchNode('branch_a', parent_id='root', depth=1,
+            incoming_edge=EdgeAction('features', 'Add sequence-length features'),
+            status=NodeStatus.SUCCESS, metrics=metric(.6), git_commit_sha='b' * 40)
+        branch_b = SearchNode('branch_b', parent_id='root', depth=1,
+            incoming_edge=EdgeAction('embedding', 'Increase embedding dimension'),
+            status=NodeStatus.SUCCESS, metrics=metric(.6), git_commit_sha='c' * 40)
+        leaf = SearchNode('leaf_a', parent_id='branch_a', depth=2,
+            incoming_edge=EdgeAction('loss', 'Use pairwise ranking'),
+            status=NodeStatus.SUCCESS, metrics=metric(.7), git_commit_sha='d' * 40)
+        self.memory.record(leaf, branch_a, self.context)
+        nodes = {n.node_id: n for n in (self.parent, branch_a, branch_b, leaf)}
+        for parent, relationship in [('branch_b', 'other_branch'), ('branch_a', 'same_parent'),
+                                      ('leaf_a', 'ancestor'), ('root', 'descendant')]:
+            with self.subTest(parent=parent):
+                summary = self.memory.prompt_summary(self.context, nodes=nodes, selected_parent_id=parent)
+                self.assertIn('run1/branch_a -> leaf_a', summary)
+                self.assertIn(f'relationship={relationship}', summary)
+                self.assertIn('source_parent_path=root -> branch_a', summary)
+                self.assertIn('Add sequence-length features', summary)
+                self.assertIn('Use pairwise ranking', summary)
+                self.assertLessEqual(len(summary), 2400)
+        other_run = MemoryContext('run2', 'protocol1', 'features')
+        summary = self.memory.prompt_summary(other_run, nodes=nodes, selected_parent_id='branch_a')
+        self.assertIn('relationship=other_run', summary)
+        self.assertNotIn('relationship=same_parent', summary)
+        self.assertNotIn('Add sequence-length features', summary)
+        nodes.pop('branch_a')
+        self.assertIn('relationship=unknown', self.memory.prompt_summary(
+            self.context, nodes=nodes, selected_parent_id='branch_b'))
+
     def test_roundtrip_and_corrupt_evidence(self):
         self.record('a')
         self.record('b', None, stderr='ValueError: shape mismatch')

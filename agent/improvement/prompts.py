@@ -17,11 +17,41 @@ behavior, affected files, and concrete parameter values where appropriate.
 Supporting edits across files are allowed when needed for that one hypothesis.
 
 Read the full genesis-to-current lineage, including hypotheses, diffs, metrics,
-and repairs. The supplied source is the current state; historical diffs must
-not be reapplied. Use outcomes to avoid repeating refuted experiments under
-the same conditions, without treating tentative explanations as proven causes.
-Additional context may contain sibling failures, cross-branch memory, current
-configuration, and remaining budgets. Respect those budgets and the objective.
+and repairs. The final lineage node is the selected parent. The supplied source
+is its current state; historical diffs must not be reapplied. You cannot choose
+a different parent or assume that a sibling's successful changes are present.
+Additional context may contain sibling experiments (successful, failed, or
+pruned), cross-branch memory, current configuration, and remaining budgets.
+Respect those budgets and the objective. Treat explanations of results as
+tentative hypotheses, not proven causes.
+
+Choose a NEW experiment from this selected parent. Before selecting it, compare
+the intended behavior and concrete settings with every supplied sibling and
+relevant historical experiment. Do not repeat an already-tried transformation
+from the same parent, even if it succeeded or a later alternative performed
+worse. Different wording, method names, or equivalent implementations do not
+make an experiment new. Do not repeat refuted experiments under unchanged
+conditions. Successful experiments are evidence for a distinct follow-up, not
+permission to recreate the same child. Repeated trials are allowed only when
+the supplied objective or constraints explicitly request replication.
+
+Memory identifies its source edge (source parent -> source node) and, when
+available, its relationship to the selected parent: same_parent, ancestor,
+descendant, or other_branch. other_run and unknown mean ancestry is unavailable.
+The source parent's path and recent historical changes describe the baseline
+where that result was observed; they may be abbreviated and are not its source
+code. A success or failure on another branch is not a universal rule. Applying
+the same change to a materially different selected-parent code state is a valid
+transfer experiment, not a duplicate. Explain the relevant baseline difference
+and why transfer may help. Do not assume different node IDs alone imply different
+code, or reintroduce behavior already present in the supplied current source.
+
+For example, if uniform pairwise training from this parent succeeded and hard
+negative sampling failed, simply proposing uniform pairwise training again is
+a duplicate. Choose a materially different experiment. If the selected parent
+already contains pairwise training, propose a new change on top of that code.
+State briefly within the requirement what distinguishes this experiment from
+the closest supplied prior attempt, or note that no relevant attempt was supplied.
 
 Preserve frozen data splits, target definitions, metrics, and test isolation.
 Never propose label leakage or changes to evaluation to improve the score.
@@ -63,6 +93,7 @@ def build_messages(files: Mapping[str, str], lineage: Sequence[SearchNode], *,
             raise ValueError("lineage requires successful evaluated nodes and their incoming edges")
         records.append({
             "node_id": node.node_id,
+            "parent_id": node.parent_id,
             "commit": node.git_commit_sha,
             "incoming_edge": asdict(node.incoming_edge) if node.incoming_edge else None,
             "metrics": asdict(node.metrics),
