@@ -1,2 +1,5 @@
 litellm==1.98.0
 python-dotenv==1.2.3
+# Agent-side raw data loading, prediction validation, and artifact handling.
+# Candidate dependencies are declared separately in workspace_template/requirements.txt.
+numpy>=1.24,<3

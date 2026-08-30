@@ -6,7 +6,7 @@ Recommender Workshop is designed to explore, optimize, and evaluate deep ranking
 
 The goal is to automate the research loop—from feature engineering and model design to execution repair and final test inference—within a fixed experiment and time budget.
 
-> **Status: early implementation.** The LLM client and its smoke-test script are implemented, and the reference starter kit is included. The autonomous search engine and evolving training pipeline remain scaffolding. No project benchmark results are claimed.
+> **Status: partial implementation.** The FM workspace, subprocess runner, independent evaluation, and checkpoint recovery are implemented alongside the LLM, mutation, graph, memory, and Git components. The autonomous orchestration loop remains scaffolding. The starter-kit evaluation protocol has not been independently verified against an official benchmark.
 
 ## Research objective
 
@@ -114,7 +114,7 @@ The six-hour budget covers initialization, baseline training, search, repairs, a
 ## Implementation roadmap
 
 - [ ] Specify and validate the KuaiRand-Pure data and metric contract.
-- [ ] Implement the fixed FM baseline and reproducible evaluation harness.
+- [x] Implement the fixed FM baseline and reproducible evaluation harness.
 - [ ] Add the experiment ledger, pipeline graph, and Git workspace lifecycle.
 - [ ] Implement parent selection, hypothesis generation, backtracking, and pruning.
 - [ ] Add bounded execution repair, failure caching, and resource enforcement.
@@ -129,6 +129,7 @@ The six-hour budget covers initialization, baseline training, search, repairs, a
 ```text
 agent/
 ├── __init__.py
+├── log.py                    # Shared structured storage/run_log.jsonl event logger
 ├── llm/
 │   ├── __init__.py
 │   ├── client.py              # LLM calls, token accounting, retries, model selection
@@ -146,13 +147,17 @@ agent/
 ├── sandbox/
 │   ├── __init__.py
 │   ├── git_driver.py          # Inner repository lifecycle
+│   ├── environment.py         # Candidate dependency environments and cache
+│   ├── protocol.py            # Fixed data loader and evaluator access
+│   ├── worker.py              # Isolated candidate entry point
 │   └── runner.py              # Training and evaluation subprocesses
 └── orchestrator.py            # Search loop and resource limits
 workspace_template/           # Editable pipeline modules passed in LLM context
 ├── features.py               # Feature extraction, item/user stats, embedding encoders
 ├── model.py                  # Neural / tabular architecture (FM, DeepFM, DCN)
 ├── train.py                  # Training loop, optimizer, loss, checkpoint saving
-└── config.py                 # Hyperparameters: learning rate, batch size, embedding dims
+├── config.py                 # Hyperparameters: learning rate, batch size, embedding dims
+└── requirements.txt          # Candidate's pinned runtime dependencies
 workspace/                    # Ignored independent Git repo; same pipeline filenames
 storage/                      # Ignored persistent outputs; .gitkeep is tracked
 ├── state_tree.json
@@ -162,7 +167,7 @@ data/kuairand-pure/            # Existing data layout preserved
 ├── starter-kit/              # Tracked fixed reference code and English README
 └── KuaiRand-Pure/data/        # Ignored raw dataset; download separately below
 checkpoints/                  # Ignored weights and predictions; .gitkeep is tracked
-requirements.txt              # LLM client dependencies
+requirements.txt              # Agent/runner dependencies, not the candidate environment
 main.py                       # Planned CLI entry point
 README.md
 ```
@@ -173,9 +178,194 @@ The outer repository versions the agent and starting template. The inner `worksp
 
 The driver uses the Git CLI through Python's `subprocess` module; Git must be installed and available on `PATH`, but GitPython is not required. It supports detached checkouts, branches rooted at explicit parent commits, UTF-8 source reads and atomic per-file writes, node commits, and unified diffs. Call `reset_hard()` and `clean_untracked()` explicitly before switching when edits should be discarded; ignored files are preserved by cleanup. Git failures propagate as `subprocess.CalledProcessError` with captured stderr. Run the isolated integration checks with `python scripts/test_git_driver.py`.
 
-The LLM client, mutation engine, and Git workspace driver are implemented; the remaining agent modules, pipeline template files, and root CLI are scaffolding. The editable template contains only `features.py`, `model.py`, `train.py`, and `config.py`, intended to be passed in LLM context. Fixed data splits, scoring, and submission checks belong outside the editable pipeline; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, or Git metadata. Runtime storage files are ignored by the outer repository and should be initialized by the agent when needed; the current local placeholders are empty, not valid serialized JSON state.
+The editable template contains `features.py`, `model.py`, `train.py`, `config.py`, and `requirements.txt`, intended to be passed in LLM context together. They implement the reference FM and declare its dependencies. The module specifications are authoritative; implementations and dependency choices are replaceable. Fixed data loading and scoring are accessed through `agent/sandbox/protocol.py`, outside the editable pipeline; the agent must not evolve the benchmark scoring rules. The template contains no data, checkpoints, virtualenv, or Git metadata. Runtime storage files are ignored by the outer repository.
 
-The root research CLI is not runnable yet. A reproducible FM baseline with a frozen evaluation contract remains a pending implementation milestone.
+The root research CLI is not runnable yet. The runner can be invoked independently as described below.
+
+### Train, evaluate, and recover a candidate
+
+Install the root `requirements.txt` for the agent/runner, then run from the repository root.
+The runner provisions a separate candidate environment on first use:
+
+```powershell
+python -B -m agent.sandbox.runner --workspace workspace_template --data-dir data/kuairand-pure/KuaiRand-Pure/data --config '{"epochs":3}' --timeout 180
+```
+
+Each invocation defaults to a fresh UUID-named checkpoint under `checkpoints/`.
+The JSON result supplies its absolute `checkpoint_path` and `artifact_dir`.
+To resume a failed attempt, repeat the command with `--checkpoint <that-path>`
+and exactly the same configuration, workspace source, train/validation data, and
+dependency environment (including Python/platform and installed package versions).
+Completed training is a no-op when resumed. Corrupt or incompatible checkpoints
+fail without being overwritten; there is no implicit warm start or automatic retry.
+
+To run final test inference explicitly, use:
+
+```powershell
+python -B -m agent.sandbox.runner --workspace workspace_template --data-dir data/kuairand-pure/KuaiRand-Pure/data --checkpoint <that-path> --inference-only --split test
+```
+
+Validation is the default; test labels are never sent to training or prediction.
+The fixed loader uses the starter-kit date boundaries and native `long_view`.
+Scoring groups impressions within each user, uses positive-count-weighted GAUC,
+and averages nDCG@5 across users including those without positives. This is the
+supplied starter-kit protocol, not a claim of official benchmark equivalence.
+
+The Python API supports preloaded seven-column splits as well:
+
+```python
+from agent.sandbox.runner import Runner
+
+runner = Runner(storage_dir="storage/runs", checkpoint_dir="checkpoints")
+result = runner.run("workspace_template", data_dir="data/kuairand-pure/KuaiRand-Pure/data",
+                    overrides={"epochs": 3}, timeout_s=180)
+if result.status == "success":
+    print(result.metrics)  # MetricResult for validation; None for test results
+else:
+    print(result.error, result.artifact_dir, result.checkpoint_path)
+```
+
+`splits={"train": rows, "valid": rows, "test": rows}` may replace `data_dir`.
+Rows are `(date, user_id, video_id, author_id, tab, duration_ms, long_view)`;
+prediction receives only the first six fields. Caller-supplied splits must obey
+the frozen experiment protocol; the runner does not repartition them.
+
+Workspace contract:
+
+- `config.resolve(overrides)` merges explicit overrides over defaults and validates them.
+- `features.fit(train_rows)` learns duration quantiles and five categorical vocabularies;
+  `transform(rows, state)` preserves order and maps unseen categories to per-field UNK slots.
+- `train.train(train_rows, valid_rows, checkpoint_path, overrides, context)` trains and saves.
+  It uses the fixed evaluator for best-checkpoint selection and early stopping.
+- `model.load_predictor(checkpoint_path)` returns an object with `predict(rows)`.
+  A separate worker loads the artifact without training; the runner independently
+  validates score count/finiteness and computes metrics against withheld labels.
+
+The single pickle checkpoint contains format version, effective configuration,
+fitted features, best inference weights, best epoch, latest validation metrics,
+and resume state: latest weights, Adam moments/step, completed epoch, shuffle RNG,
+best score, and patience counter. It also records hashes of workspace Python
+source, training/validation rows, and fixed protocol source. Each completed epoch
+is saved to a unique temporary file, flushed, then atomically replaced. Recovery
+replays work since the last completed epoch; it is not mid-batch recovery.
+The checkpoint context also contains the candidate environment identity and
+installed-package snapshot. Checkpoints from before environment tracking cannot
+be exact-resumed under the new contract; there is no silent compatibility bypass.
+
+Each attempt stores `result.json` (including checkpoint hash and execution context),
+training/prediction stdout and stderr logs, and successful `predictions.npy` in
+input order. Failure/timeout results have no metrics. Test scores are available
+in `result.scores` but never represented as validation `MetricResult` objects.
+
+The timeout is shared by environment creation/installation/verification and the
+training and inference subprocesses. Data loading,
+serialization, and fixed scoring count toward elapsed time but are synchronous,
+so they may overrun the deadline before returning a timeout. The runner terminates
+the direct worker on timeout, not arbitrary descendant processes. This is process
+isolation, **not an OS security sandbox**: run only trusted candidate code and
+trusted pickle checkpoints. Concurrent writers to the same checkpoint are unsupported.
+
+### Candidate dependency environments
+
+The root environment runs the agent, data loader, and authoritative evaluation.
+It includes NumPy for raw loading and prediction artifact handling. The workspace
+independently declares NumPy for the reference FM; candidates do not inherit the
+agent's installed packages. The worker transport and fixed evaluator are
+standard-library-only, so non-NumPy candidate implementations can omit NumPy.
+
+`workspace_template/requirements.txt` is a flat version lock. Include **all**
+runtime dependencies, including transitives, as exact `name==version` pins.
+Comments and blank lines are allowed; includes, options, URLs, editable installs,
+extras, markers, ranges, and source distributions are intentionally unsupported.
+The runner installs wheels with `--no-deps` and then runs `pip check`; missing
+transitive pins fail instead of being silently resolved. This is a version lock,
+not a hash-verified artifact lock. Packages must be trusted, and a wheel must be
+available for the selected Python/platform. The reference pins NumPy 2.5.2.
+
+The runner owns cached virtualenvs under ignored `storage/environments/`, outside
+the workspace. Cache keys include the complete dependency declaration (comments
+included), Python version/implementation/ABI, platform, and provisioning policy.
+Matching candidates reuse the environment without reinstalling. A readiness
+manifest is published only after successful installation; failed owned builds
+are removed when possible. Cleanup failures (for example, locked Windows DLLs)
+are logged with the leftover directory without masking the original error.
+An incomplete cache left by a killed runner or failed cleanup is rejected, not reused;
+after confirming no process is building it, remove that specific cache directory
+before retrying. Concurrent first-time creation of the same key fails clearly.
+
+Before reuse and after successful worker execution, the runner checks runtime
+identity and installed distribution names/versions against the manifest. Drift
+fails the attempt; cached environments are never silently upgraded or repaired.
+Candidates must not modify shared environments. These checks do not hash every
+installed file and do not make candidate code a security sandbox.
+
+Every attempt records the dependency declaration, environment manifest (including
+interpreter path and installed packages), and environment stdout/stderr logs.
+Training and prediction run under that virtualenv's Python with isolated imports,
+not the root Python. `Runner(python=...)` selects the bootstrap Python version,
+not an escape hatch to run candidates in the agent environment.
+
+Use `Runner(environment_dir=..., wheelhouse=...)` or CLI `--environment-dir` and
+`--wheelhouse` to customize storage or supply an offline wheel directory.
+With `--wheelhouse`, the package index is disabled. Otherwise initial provisioning
+may access the default pip index; there is no separate dependency-install timeout
+outside the candidate budget. Existing initialized workspaces are not overwritten:
+add and commit their own `requirements.txt` explicitly before using this runner.
+
+### Shared run event log
+
+`agent/log.py` provides `RunLogger`, which appends structured UTF-8 records to
+`storage/run_log.jsonl`. Runner start/completion and environment creation/reuse,
+build failures, and cleanup warnings share the attempt's `run_id`. Each record
+contains `schema_version`, UTC `timestamp`, `level`, `component`, `event`, `run_id`,
+and a `data` object. Artifact paths link events to detailed per-attempt logs;
+raw subprocess output, credentials, and unredacted exception messages are not
+copied into the shared log.
+
+```python
+from agent.log import RunLogger
+
+logger = RunLogger()  # Defaults to storage/run_log.jsonl
+logger.emit("search.started", component="orchestrator", run_id="search-001")
+```
+
+Use `Runner(log_path=...)` or CLI `--log-path` to choose another destination.
+Logging is best-effort: `emit` returns `False` and writes a minimal stderr notice
+if serialization or writing fails, without replacing the original task error.
+Appends are thread-safe within one parent agent process; separate independent
+agent processes should use separate log paths. This is a diagnostic event log,
+not a transactional or crash-durable experiment ledger. Candidate processes keep
+using stdout/stderr, which the runner persists separately.
+
+Checks:
+
+```powershell
+python -B scripts/test_runner.py
+python -B scripts/test_environment.py
+python -B scripts/test_log.py
+python -B scripts/test_runner.py --real-data
+```
+
+The runner suite checks exact starter-FM predictions, metric agreement within
+1e-6 (NumPy label types cause tiny rounding differences), read-only inference,
+fresh artifact paths, process-crash recovery equal to uninterrupted training,
+failed atomic saves, compatibility checks, timeouts, and malformed predictions.
+Its first run may install the pinned FM dependencies; set `RUNNER_TEST_WHEELHOUSE`
+to a local wheel directory for offline provisioning. Environment tests build a
+tiny local wheel and need no package index: they cover isolation, cache reuse,
+dependency-key changes, drift rejection, install failures, and a non-NumPy candidate.
+The optional raw-data smoke test uses only the first 10,000 rows per split and
+three epochs; its scores are not full-benchmark results.
+
+Local verification on 2026-08-30 also completed three epochs on the full raw
+training split with default FM settings: validation GAUC 0.664194, nDCG@5
+0.534426, Primary 0.599310 (124,909 rows), in 20.1 seconds including loading and
+evaluation. Independent test inference from that checkpoint yielded GAUC
+0.657770, nDCG@5 0.526752, Primary 0.592261 (170,588 rows). These are a runner
+verification run, not converged FM or autonomous-search benchmark results.
+Repeating the full three-epoch run in the managed candidate environment reproduced
+the same validation and test scores; that environment contained only NumPy 2.5.2
+and bootstrap pip, with no agent/LLM dependencies.
 
 ### Download KuaiRand-Pure
 

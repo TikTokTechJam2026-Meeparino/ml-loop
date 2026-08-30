@@ -1,0 +1,7 @@
+# Candidate dependency contract (tracked with this workspace).
+# Pin every dependency, including transitive dependencies, as name==version.
+# No includes, URLs, editable installs, markers, extras, or pip options.
+# The runner installs wheels only, without dependency resolution, then runs
+# pip check. Update this file with model/features/train changes as needed.
+# Reference FM implementation dependencies (replaceable, not mandatory):
+numpy==2.5.2
