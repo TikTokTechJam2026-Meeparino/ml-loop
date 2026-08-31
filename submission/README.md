@@ -11,8 +11,8 @@ candidate workspace commit `52a281a3146b4b40cc5f2c9f11a8d7c22b164b9f`.
 
 | File | Size | What it is |
 |---|---|---|
-| `submission-test.csv` | 4.3 MB | **The required output.** 170,588 test-split rows in the kit schema `row_id,user_id,video_id,score`. |
-| `submission-valid.csv` | 3.1 MB | Same model on the validation split, 124,909 rows. This is the split selection used, and the only one the kit can self-score without withheld labels. |
+| `submission-test.csv` | 4.3 MB | **The scored output.** 170,588 test-split rows in the kit schema `row_id,user_id,video_id,score`. Test is the split the kit reports baselines on and the one FM must be beaten on. |
+| `submission-valid.csv` | 3.1 MB | Same model on the validation split, 124,909 rows. Supporting evidence only. Validation is the split the search was permitted to use while selecting candidates; test was held back for the selected pipeline alone. |
 | `pipeline/` | 29 KB | The five editable pipeline files exactly as the selected model left them. |
 | `SHA256SUMS.txt` | — | Checksums for every file above. |
 
