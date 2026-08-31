@@ -3,3 +3,8 @@
 # the model emits LF, so every edit is rejected as a line-ending mismatch.
 # Pin them to LF regardless of the user's autocrlf setting.
 workspace_template/** text eol=lf
+
+# The submission package ships with SHA-256 checksums covering every file. Any
+# line-ending conversion on checkout would change those bytes and break
+# verification, so freeze the whole directory exactly as committed.
+submission/** -text
