@@ -55,7 +55,7 @@ class RunConfig:
     final_reserve_s: float = 120
     max_repairs: int = 3
     proposal_attempts: int = 2
-    mutation_attempts: int = 2
+    mutation_attempts: int = 4
     proposal_tokens: int = 4096
     mutation_tokens: int = 8192
     max_prompt_chars: int = 200000

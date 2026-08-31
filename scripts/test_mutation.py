@@ -101,6 +101,22 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(caught.exception.rejected_output, output)
         self.assertIn("truncated", str(caught.exception))
 
+    def test_source_hints_reach_retry_and_corrected_edit_applies(self):
+        files = {'train.py': 'if resume:\n    model = FM()\nelse:\n    model = FM()\n'}
+        bad = edit('train.py', '    model = FM()', '    model = FFM()')
+        good = edit('train.py', 'else:\n    model = FM()', 'else:\n    model = FFM()')
+        engine = self.engine(bad, good)
+        with self.assertRaises(EditError) as caught:
+            engine.mutate('Change only fresh construction', files)
+        feedback = EditFeedback(str(caught.exception), caught.exception.rejected_output)
+        result = engine.mutate('Change only fresh construction', files, feedback=feedback)
+        sent = engine.client.requests[-1].messages[-1]['content']
+        self.assertIn('Exact occurrence at line 2', sent)
+        self.assertIn('Exact occurrence at line 4', sent)
+        self.assertIn('check ALL blocks', sent)
+        self.assertEqual(result['train.py'], 'if resume:\n    model = FM()\nelse:\n    model = FFM()\n')
+        self.assertNotIn('FFM', files['train.py'])
+
     def test_provider_errors_propagate(self):
         engine = self.engine(LLMError("Request failed"))
         with self.assertRaises(LLMError):

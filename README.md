@@ -383,7 +383,8 @@ its final test did not succeed.
 
 Defaults retain 50 candidates and six hours, with a 120-second finalization
 reserve, 1,800-second limit per runner invocation, three repairs per candidate,
-two proposal attempts, two initial mutation attempts, and 200 logical model
+two proposal attempts, four initial mutation attempts (one try plus three
+correction retries), and 200 logical model
 calls. Default proposal/mutation output caps are 4,096/8,192 tokens; reflection
 uses 128. Prompts exceeding 200,000 characters pause the run rather than silently
 dropping history. Model calls are counted before dispatch; returned token usage
@@ -730,6 +731,30 @@ print(client.total_usage)
 The wrapper retries transient failures with bounded exponential backoff and jitter, but does not retry authentication or invalid-request failures. Each profile's `MAX_RETRIES` counts retries after the first attempt; its `TIMEOUT` is the per-attempt ceiling. The orchestrator supplies a monotonic deadline that further limits each request and retry delay. Usage totals count returned provider-reported tokens only, not potentially billed failed requests; missing usage is explicitly represented by `None`. Raw provider exception messages are not included in wrapper errors.
 
 ### Detailed local diagnostics
+
+Rejected SEARCH/REPLACE patches now include bounded source hints: up to three
+exact-match locations with surrounding lines for ambiguous edits, or similar
+source lines for missing matches. CRLF/LF-only mismatches are identified.
+Hints describe the temporary source after preceding edits in that response;
+the original files remain unchanged when any edit fails. Similarity is used
+only for diagnostics, never for automatic fuzzy replacement. Retry prompts
+include these hints and ask the model to check every block, including repeated
+fresh-training/resume constructors. New runs default to four mutation attempts
+(one initial try plus three correction retries). Explicit JSON overrides and
+saved run settings take precedence; existing runs are not changed. The historical
+three-iteration sample above explicitly uses two attempts. Runtime repairs retain
+their separate limit of three, and overall model-call and time budgets still apply.
+
+Replay a saved run's rejected patches offline, without model calls or writes to
+its candidate workspace:
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts/replay_edit_rejections.py storage/live-50-20260831-01
+```
+
+This verifies rejection safety and diagnostic coverage, not whether a live
+model would successfully correct its response. Replay expects the current
+diagnostic schema and complete source snapshots with trailing newlines.
 
 Every orchestrated model call now writes full redacted prompts and responses to
 `<run-dir>/diagnostics/*.json`, linked by events in `events.jsonl`. This includes

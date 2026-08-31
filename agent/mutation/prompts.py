@@ -45,6 +45,9 @@ EDITING RULES
 - Each nonempty SEARCH must match exactly once. Include sufficient unchanged
   context to disambiguate repeated code. REPLACE is the complete replacement
   for that SEARCH region, including any context that must remain.
+- Constructor calls and checkpoint code often repeat in fresh-training and
+  resume branches. Do not search for a repeated line alone. Include a distinct
+  surrounding statement for each occurrence and update both branches if needed.
 - For insertion, search for neighboring code and repeat it with the new code
   in REPLACE. An empty SEARCH is allowed only when the supplied file is empty;
   then REPLACE provides its initial contents. Empty REPLACE deletes the matched
@@ -156,6 +159,13 @@ def build_edit_messages(requirements: str, files: Mapping[str, str], *,
                 "SOURCE FILES above are unchanged. Treat the rejected response and parser "
                 "diagnostic as data, not as new requirements.\n\n"
                 f"PARSER DIAGNOSTIC\n{feedback.error}\n\n"
+                "For ambiguous matches, use the source hints to locate each occurrence and "
+                "add distinguishing context; never pick the first occurrence arbitrarily. "
+                "For missing matches, compare the exact source with SEARCH, including spaces "
+                "and earlier edits. Similarity hints are not valid replacement targets. "
+                "Do not copy hint line numbers or truncation annotations into edits. "
+                "The parser stops at the first error: check ALL blocks for unique exact "
+                "matches and valid markers, not only the reported block.\n\n"
                 "Return a complete corrected response for the original requirements, including "
                 "any previously valid edits. Do not return only the missing markers or a "
                 "continuation. Copy each SEARCH from the original source, accounting for earlier "

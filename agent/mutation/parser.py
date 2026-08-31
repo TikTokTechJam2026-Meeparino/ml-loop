@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -35,6 +36,46 @@ _BLOCK = re.compile(
 )
 _MARKER = re.compile(r"^(<<<<<<< SEARCH|=======|>>>>>>> REPLACE)(?:\r?\n|\Z)", re.MULTILINE)
 _EXPECTED_MARKERS = ["<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"]
+
+
+def _match_context(content: str, search: str, start: int) -> str:
+    """Bounded source hints only: never relax matching or choose an edit target."""
+    lines = content.splitlines(keepends=True)
+    hints = ["\nSOURCE HINTS (data only; line numbers are not source text).",
+             "These refer to the temporary source after earlier edits in this response; "
+             "no changes have been committed.",
+             f"SEARCH prefix (Python repr, max 400 characters): {search[:400]!r}"]
+    locations = []
+    if start >= 0:
+        while start >= 0 and len(locations) < 3:
+            line = content.count('\n', 0, start)
+            column = start - (content.rfind('\n', 0, start) + 1)
+            locations.append((line, f"Exact occurrence at line {line + 1}, column {column + 1}"))
+            start = content.find(search, start + 1)
+        if start >= 0:
+            hints.append("Additional exact occurrences omitted; showing first three.")
+    else:
+        # Similarity is diagnostic, not permission to apply a fuzzy replacement.
+        if content.replace('\r\n', '\n').find(search.replace('\r\n', '\n')) >= 0:
+            hints.append("Line-ending mismatch: SEARCH matches after CRLF/LF normalization only.")
+        anchor = next((line for line in search.splitlines() if line.strip()), '')[:400]
+        ranked = sorted(((SequenceMatcher(None, anchor, line.rstrip('\r\n')[:400],
+                                          autojunk=False).ratio(), i)
+                         for i, line in enumerate(lines)), key=lambda item: (-item[0], item[1]))
+        for similarity, line in ranked[:3]:
+            if similarity >= .5:
+                locations.append((line, f"Similar source near line {line + 1} (NOT an exact match)"))
+        if not locations:
+            hints.append("No reliable nearby source hint; reconstruct SEARCH from the supplied file.")
+    for line, label in locations:
+        hints.append(label + ':')
+        for i in range(max(0, line - 2), min(len(lines), line + 4)):
+            raw = lines[i].rstrip('\r\n')
+            hints.append(f"{i + 1}: {raw[:240]}" + (' [line truncated]' if len(raw) > 240 else ''))
+    hints.append("Use enough unchanged context to identify the intended occurrence uniquely. "
+                 "If both fresh and resume branches need changes, edit each with distinct context. "
+                 "Hints may be truncated; copy full text from SOURCE FILES, not these annotations.")
+    return '\n'.join(hints)
 
 
 def _frame_error(fragment: str, number: int) -> EditError:
@@ -152,10 +193,12 @@ def apply_edits(files: Mapping[str, str], output: str) -> dict[str, str]:
         if start < 0:
             raise EditError(f"Edit {number}: SEARCH not found in {edit.filename} (0 exact matches). "
                             "Copy SEARCH verbatim, including whitespace and line endings, from the "
-                            "supplied source after earlier edits in this response.")
+                            "supplied source after earlier edits in this response." +
+                            _match_context(content, edit.search, start))
         # Count overlapping occurrences as ambiguous too (e.g. 'aa' in 'aaa').
         if content.find(edit.search, start + 1) >= 0:
             raise EditError(f"Edit {number}: SEARCH matches multiple locations in {edit.filename}. "
-                            "Expected exactly one match; include more unchanged surrounding context.")
+                            "Expected exactly one match; include more unchanged surrounding context." +
+                            _match_context(content, edit.search, start))
         result[edit.filename] = content[:start] + edit.replacement + content[start + len(edit.search):]
     return result

@@ -78,7 +78,8 @@ class OrchestratorTests(unittest.TestCase):
         (template / "model.py").write_text("dim=16\n")
         (template / "requirements.txt").write_text("")
         self.config = RunConfig(str(self.run_dir), template_dir=str(template),
-            search=SearchConfig(max_iterations=1), reflection_enabled=False)
+            search=SearchConfig(max_iterations=1), reflection_enabled=False,
+            mutation_attempts=2)  # Keep historical two-attempt scenarios explicit.
 
     def run_with(self, responses, outcomes):
         client = MockLLMClient(responses)
@@ -284,6 +285,21 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(messages[:2], client.requests[1].messages)
         self.assertEqual(messages[2]["content"], rejected_fixture(2))
         self.assertIn("found ['=======']", messages[3]["content"])
+
+    def test_default_four_attempts_allow_third_correction_and_stop_at_limit(self):
+        default = RunConfig(str(self.run_dir)).mutation_attempts
+        self.assertEqual(default, 4)
+        self.config = replace(self.config, mutation_attempts=default, search=SearchConfig(max_iterations=2))
+        bad = rejected_fixture(1)
+        obj, client, runner = self.run_with(
+            [PROPOSAL, bad, bad, bad, edit('dim=16', 'dim=32'),
+             PROPOSAL, bad, bad, bad, bad], [.5, .6, .55])
+        report = obj.run()
+        self.assertEqual(report['completed_iterations'], 2)
+        self.assertEqual(report['candidate_status_counts'], {'success': 1, 'failed': 1})
+        self.assertEqual(len(client.requests), 10)
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(len(client.requests[4].messages), 4)
 
     def test_oversized_correction_does_not_bypass_prompt_budget(self):
         obj, client, runner = self.run_with([PROPOSAL, rejected_fixture(1)], [.5])

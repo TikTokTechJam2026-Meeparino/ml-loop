@@ -47,6 +47,47 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(EditError):
             apply_edits({"a.py": "x"}, block("a.py", "", "y"))
 
+    def test_ambiguous_context_supports_safe_correction(self):
+        source = 'if resume:\n    model = FM()\nelse:\n    model = FM()\n'
+        files = {'train.py': source}
+        with self.assertRaises(EditError) as caught:
+            apply_edits(files, block('train.py', '    model = FM()', '    model = FFM()'))
+        message = str(caught.exception)
+        self.assertIn('Exact occurrence at line 2', message)
+        self.assertIn('Exact occurrence at line 4', message)
+        self.assertIn('1: if resume:', message)
+        self.assertIn('3: else:', message)
+        corrected = (block('train.py', 'if resume:\n    model = FM()', 'if resume:\n    model = FFM()')
+                     + block('train.py', 'else:\n    model = FM()', 'else:\n    model = FFM()'))
+        self.assertEqual(apply_edits(files, corrected)['train.py'], source.replace('FM()', 'FFM()'))
+        self.assertEqual(files['train.py'], source)
+
+    def test_missing_match_hint_does_not_apply_fuzzy_edit(self):
+        files = {'config.py': 'DEFAULTS = dict(k=16, lr=0.001)\n'}
+        with self.assertRaises(EditError) as caught:
+            apply_edits(files, block('config.py', 'DEFAULTS = dict(k=16, lr=0.01)', 'wrong'))
+        self.assertIn('NOT an exact match', str(caught.exception))
+        self.assertIn('lr=0.001', str(caught.exception))
+        self.assertNotIn('wrong', files['config.py'])
+
+    def test_hints_use_sequential_source_and_are_bounded(self):
+        files = {'a.py': 'first\nsecond\n'}
+        output = block('a.py', 'first', 'second') + block('a.py', 'second', 'last')
+        with self.assertRaises(EditError) as caught:
+            apply_edits(files, output)
+        self.assertIn('Exact occurrence at line 1', str(caught.exception))
+        self.assertIn('Exact occurrence at line 2', str(caught.exception))
+        self.assertEqual(files['a.py'], 'first\nsecond\n')
+        with self.assertRaises(EditError) as caught:
+            apply_edits({'a.py': ('x' * 1000 + '\n') * 100}, block('a.py', 'x' * 1000, 'y'))
+        self.assertLess(len(str(caught.exception)), 6000)
+        self.assertIn('Additional exact occurrences omitted', str(caught.exception))
+
+    def test_line_ending_hint_preserves_strictness(self):
+        with self.assertRaises(EditError) as caught:
+            apply_edits({'a.py': 'x\r\ny'}, block('a.py', 'x\ny', 'z'))
+        self.assertIn('Line-ending mismatch', str(caught.exception))
+
     def test_no_changes_copies(self):
         files = {"a.py": "x"}
         result = apply_edits(files, "NO_CHANGES\n")
