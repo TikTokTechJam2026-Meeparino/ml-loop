@@ -62,10 +62,15 @@ The tree registry retains pending, running, successful, failed, and pruned attem
 New runs default to **best-first with bounded detours** (`strategy="best_first"`).
 The tree records ancestry, while parent selection considers a flat pool of
 evaluated models. Usually select the model with the highest own validation
-Primary; promote any strictly higher score immediately and retain the incumbent
-on ties. There is no child cap, forced expansion, or subtree pruning. Lower
-scores remain in the archive, and failed implementations do not lower parent
-scores or add zero-reward visits.
+Primary; promote a score that exceeds the incumbent by more than
+`promotion_threshold` (default 1e-4) and retain the incumbent on ties and on
+smaller gains. The threshold keeps a noise-scale result from making an expensive
+candidate the parent for every later experiment. A non-promoted candidate still
+enters the archive and can still be the finally selected pipeline, since final
+selection uses the best archived score rather than the incumbent. There is no
+child cap, forced expansion, or subtree pruning. Lower scores remain in the
+archive, and failed implementations do not lower parent scores or add
+zero-reward visits.
 
 After `stagnation_patience=5` successfully evaluated candidates without a new
 global best, start a detour. Prefer the highest-scoring alternative outside the
@@ -89,15 +94,17 @@ These limits are spending guards, not evidence of mathematical convergence.
 
 Search stopping uses the existing finalization flow: freeze the best model,
 attempt final test inference within the reserved budget, and write the report.
-It does not authorize another run. Any higher validation score counts as a
-selection improvement; this is not a statistical-significance claim.
+It does not authorize another run. A validation gain above `promotion_threshold`
+counts as a selection improvement; this is a budget guard against noise-scale
+promotions, not a statistical-significance claim.
 
 **Legacy UCT** remains available with `strategy="uct"`. It uses backed-up mean
 Primary plus `c * sqrt(log(parent_visits) / visits)`, default `c=sqrt(2)`, and
 counts failures as zero-reward visits. It fills three child-attempt slots before
 descending, prunes parent-relative drops greater than 0.01, and retains its old
 convergence rule. `exploration_weight`, `max_children`, `prune_delta`, `patience`,
-and `improvement_threshold` affect UCT only. Genesis remains outside the candidate
+and `improvement_threshold` affect UCT only, and `promotion_threshold` affects
+best-first only. Genesis remains outside the candidate
 budget, and both policies permit one active attempt.
 
 Version-2 tree checkpoints persist and validate detour state by replaying
@@ -439,7 +446,14 @@ reserve, 1,800-second limit per runner invocation, three repairs per candidate,
 two proposal attempts, four initial mutation attempts (one try plus three
 correction retries), and 200 logical model
 calls. Default proposal/mutation output caps are 4,096/8,192 tokens; reflection
-uses 128. Prompts exceeding 200,000 characters pause the run rather than silently
+uses 128. A `promotion_threshold` of 1e-4 gates incumbent promotion, and
+reflection triggers on parent-relative gains above `breakthrough_delta` (0.0005)
+or losses below `collapse_delta` (-0.001); resumed runs keep the values recorded
+in their own snapshots. The search also refuses to start a candidate when the
+remaining search budget is below `candidate_headroom` (1.25) times the median
+observed candidate wall clock, capped at one `candidate_timeout_s`, and reports
+`stop_reason="candidate_time_budget"`; set `candidate_headroom` to 0 to disable
+that guard. Prompts exceeding 200,000 characters pause the run rather than silently
 dropping history. Model calls are counted before dispatch; returned token usage
 is accumulated separately and is not a hard total-token or dollar budget.
 Transport retries and requests lost during interruption can still incur costs.

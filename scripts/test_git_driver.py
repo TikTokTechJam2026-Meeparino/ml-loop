@@ -71,6 +71,38 @@ class GitDriverTests(unittest.TestCase):
         self.driver.write_files({"model.py": source})
         self.assertEqual(self.driver.read_active_files(["model.py"])["model.py"], source)
 
+    def test_workspace_template_is_lf_and_survives_workspace_creation(self):
+        """The real template must stay LF on disk, not just in the Git index.
+
+        The model copies SEARCH text from these files verbatim, so a CRLF
+        checkout makes every edit unmatchable and the search cannot mutate
+        anything. .gitattributes pins them to eol=lf, but that governs only
+        future checkouts: a clone made before it with core.autocrlf=true still
+        has CRLF on disk and fails here. Fix such a checkout with
+        `git add --renormalize .`, not by relaxing this test.
+        """
+        template = Path(__file__).resolve().parents[1] / "workspace_template"
+        sources = sorted(path for path in template.rglob("*") if path.is_file())
+        self.assertIn("model.py", [path.name for path in sources])
+        for path in sources:
+            with self.subTest(path=path.name):
+                self.assertNotIn(b"\r\n", path.read_bytes())
+        driver = GitDriver(self.root / "template_workspace")
+        driver.init_workspace(template)
+        for path in sources:
+            with self.subTest(copied=path.name):
+                self.assertNotIn(b"\r\n", (driver.workspace_dir / path.name).read_bytes())
+        self.assertNotIn("\r\n", driver.read_active_files(["model.py"])["model.py"])
+
+    def test_gitattributes_pins_the_template_to_lf(self):
+        root = Path(__file__).resolve().parents[1]
+        if not (root / ".git").exists():
+            self.skipTest("not a Git checkout")
+        attribute = subprocess.check_output(
+            ["git", "check-attr", "eol", "--", "workspace_template/model.py"],
+            cwd=root, text=True, encoding="utf-8")
+        self.assertIn("eol: lf", attribute)
+
     def test_uninitialized_nested_workspace_cannot_touch_parent(self):
         nested = self.driver.workspace_dir / "nested"
         nested.mkdir()

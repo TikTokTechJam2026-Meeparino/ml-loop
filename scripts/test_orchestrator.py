@@ -160,7 +160,8 @@ class OrchestratorTests(unittest.TestCase):
             path = folder / filename
             payload = json.loads(path.read_text())
             config = payload['config']['search'] if filename == 'state.json' else payload['config']
-            for key in ('strategy', 'stagnation_patience', 'detour_attempts', 'max_detours'):
+            for key in ('strategy', 'stagnation_patience', 'detour_attempts', 'max_detours',
+                        'promotion_threshold'):
                 config.pop(key)
             if filename == 'tree.json':
                 payload['version'] = 1
@@ -405,6 +406,44 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(report["stop_reason"], "genesis_failed")
         self.assertEqual(client.requests, [])
 
+    def test_insufficient_headroom_stops_before_starting_a_candidate(self):
+        from dataclasses import replace
+        # FakeRunner reports elapsed_s=1, so a x100 headroom needs 100s.
+        self.config = replace(self.config, candidate_headroom=100)
+        obj, client, runner = self.run_with([], [.5, .4])
+        original = obj._search
+        def shrink():
+            obj.budget.deadline = __import__("time").time() + obj.config.final_reserve_s + 30
+            original()
+        obj._search = shrink
+        report = obj.run()
+        self.assertEqual(report["stop_reason"], "candidate_time_budget")
+        self.assertEqual(report["completed_iterations"], 0)
+        self.assertEqual(report["final_test"]["status"], "success")  # Reserve intact.
+        self.assertEqual(client.requests, [])  # No proposal was paid for.
+
+    def test_headroom_uses_the_median_of_evaluated_nodes(self):
+        from dataclasses import replace
+        obj, _, _ = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, .6, .55])
+        obj.run()
+        self.assertEqual(obj._typical_candidate_s(), 1.0)
+        self.assertEqual(obj._candidate_headroom_s(), 1.25)
+        self.assertEqual(RunConfig(str(self.run_dir)).candidate_headroom, 1.25)
+        for value in (-1, float("inf"), float("nan"), True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(self.config, candidate_headroom=value)
+
+    def test_recalibrated_default_reflects_on_a_small_real_gain(self):
+        from dataclasses import replace
+        self.assertEqual(RunConfig(str(self.run_dir)).breakthrough_delta, .0005)
+        self.config = replace(self.config, reflection_enabled=True)
+        obj, client, _ = self.run_with(
+            [PROPOSAL, edit("dim=16", "dim=32"), "Small capacity gain."], [.5, .501, .5])
+        obj.run()
+        _, _, memory = RunStore(self.run_dir).load()
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(memory.insights[0].reflection, "Small capacity gain.")
+
     def test_budget_reserve_skips_search_but_allows_final_test(self):
         obj, client, runner = self.run_with([], [.5, .4])
         original = obj._search
@@ -472,7 +511,9 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_exact_reflection_threshold_does_not_trigger(self):
         from dataclasses import replace
-        self.config = replace(self.config, reflection_enabled=True)
+        # Pin the threshold so this keeps testing exact-threshold semantics
+        # rather than tracking whatever the default happens to be.
+        self.config = replace(self.config, reflection_enabled=True, breakthrough_delta=.01)
         obj, client, runner = self.run_with([PROPOSAL, edit("dim=16", "dim=32")], [.5, .51, .5])
         obj.run()
         self.assertEqual(len(client.requests), 2)

@@ -141,6 +141,27 @@ class ParserTests(unittest.TestCase):
         edit = parse_edits(block("a.py", source, "pass", fence="````"))[0]
         self.assertEqual(edit.search, source)
 
+    def test_documented_example_is_two_parseable_same_file_edits(self):
+        """The prompt's worked example must itself satisfy the parser.
+
+        Both live-run rejections emitted several edits per file while labelling
+        only the first, so the example demonstrates the repeated FILE: line.
+        This fails if that example is ever reworded into something invalid.
+        """
+        from agent.mutation.parser import _BLOCK
+        from agent.mutation.prompts import SYSTEM_PROMPT
+        blocks = list(_BLOCK.finditer(SYSTEM_PROMPT))
+        self.assertEqual(len(blocks), 2)
+        example = SYSTEM_PROMPT[blocks[0].start():blocks[-1].end()]
+        edits = parse_edits(example)
+        self.assertEqual([edit.filename for edit in edits], ["model.py", "model.py"])
+        self.assertTrue(all(edit.search and edit.replacement for edit in edits))
+
+    def test_unlabeled_second_fence_names_the_file_repetition_rule(self):
+        output = block("a.py", "one", "two") + block("a.py", "two", "three").split("\n", 1)[1]
+        with self.assertRaisesRegex(EditError, "Repeat the FILE: line"):
+            parse_edits(output)
+
     def test_crlf_preserved(self):
         output = block("a.py", "x\r\ny", "a\r\nb", newline="\r\n")
         self.assertEqual(apply_edits({"a.py": "x\r\ny\r\n"}, output), {"a.py": "a\r\nb\r\n"})

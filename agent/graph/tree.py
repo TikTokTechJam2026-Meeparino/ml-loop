@@ -35,6 +35,9 @@ class SearchConfig:
     stagnation_patience: int = 5
     detour_attempts: int = 2
     max_detours: int = 1
+    # Best-first setting; ignored by uct. Gains at or below this are ties, so a
+    # noise-scale result cannot make an expensive candidate the new incumbent.
+    promotion_threshold: float = 1e-4
 
     def __post_init__(self) -> None:
         if self.strategy not in ("best_first", "uct"):
@@ -45,17 +48,26 @@ class SearchConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.max_detours) is not int or self.max_detours < 0:
             raise ValueError("max_detours must be a nonnegative integer")
-        for name in ("exploration_weight", "improvement_threshold", "max_wall_clock_s", "prune_delta"):
+        for name in ("exploration_weight", "improvement_threshold", "max_wall_clock_s",
+                     "prune_delta", "promotion_threshold"):
             _finite(getattr(self, name), name)
-        if self.exploration_weight < 0 or self.improvement_threshold < 0:
-            raise ValueError("Exploration weight and improvement threshold must be nonnegative")
+        if (self.exploration_weight < 0 or self.improvement_threshold < 0
+                or self.promotion_threshold < 0):
+            raise ValueError("Exploration weight and improvement/promotion thresholds "
+                             "must be nonnegative")
         if self.max_wall_clock_s <= 0 or self.prune_delta >= 0:
             raise ValueError("Time budget must be positive and prune_delta negative")
 
     @classmethod
     def from_saved(cls, raw):
-        """Old runs remain UCT even though new runs default to best-first."""
-        return cls(**{"strategy": "uct", **raw})
+        """Pin semantics that a new default would otherwise change mid-run.
+
+        Old runs remain UCT even though new runs default to best-first. Runs
+        recorded before the promotion threshold existed keep promoting on any
+        strict improvement: their saved selection history was produced under
+        that rule and no longer replays under a nonzero threshold.
+        """
+        return cls(**{"strategy": "uct", "promotion_threshold": 0.0, **raw})
 
 
 def _finite(value: float, name: str) -> None:
@@ -242,7 +254,7 @@ class SearchTree:
         self.completed_ids.append(node_id)
         self.best_history.append(max(self.best_history[-1], reward))
         if self.selection is not None:
-            self.selection.complete(node, self.nodes)
+            self.selection.complete(node, self.nodes, self.config)
         elif metrics is not None:
             delta = reward - self.nodes[node.parent_id].metrics.val_primary
             if delta < self.config.prune_delta and not math.isclose(delta, self.config.prune_delta, abs_tol=1e-12, rel_tol=0):
@@ -451,7 +463,7 @@ class SearchTree:
             replay.reserve(node.parent_id, reason, self.config)
             if node_id in active:
                 break
-            replay.complete(node, available)
+            replay.complete(node, available, self.config)
             available[node_id] = node
         if self.selection is None or asdict(replay) != asdict(self.selection):
             raise ValueError("Best-first state disagrees with completion history")

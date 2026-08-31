@@ -85,6 +85,10 @@ def _frame_error(fragment: str, number: int) -> EditError:
         f"{location}: unexpected text or incomplete FILE/code-fence frame. "
         "Expected FILE: path, an opening code fence, all three SEARCH/REPLACE "
         "markers inside it, and a matching closing fence; no surrounding prose."
+        # Appended, never prepended: replay_edit_rejections.py compares saved
+        # rejections with startswith, so the leading text must stay stable.
+        " Repeat the FILE: line above every fenced edit, including consecutive "
+        "edits to the same file."
     )
 
 

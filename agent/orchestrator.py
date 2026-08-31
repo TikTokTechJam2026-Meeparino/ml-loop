@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import statistics
 import time
 import uuid
 
@@ -39,7 +40,11 @@ CONSTRAINTS = (
     "evaluation, and test isolation. Do not read test data during search. "
     "Keep the train.train and model.load_predictor contracts in the supplied files. "
     "Do not modify the agent, evaluator, dataset, shared environments, or external files. "
-    "Only edit the supplied files. Keep artifacts outside source."
+    "Only edit the supplied files. Keep artifacts outside source. "
+    # Echoed into the requirement handed to the mutation engine, so the mutator
+    # sees the same limit the proposal was chosen under.
+    "One candidate's training and validation must finish inside candidate_timeout_s; "
+    "exceeding it kills the candidate and records a failure."
 )
 
 
@@ -53,6 +58,9 @@ class RunConfig:
     search: SearchConfig = field(default_factory=SearchConfig)
     candidate_timeout_s: float = 1800
     final_reserve_s: float = 120
+    # Multiplier on the median observed candidate wall clock. The search refuses
+    # to start a candidate it cannot afford to finish; 0 disables the guard.
+    candidate_headroom: float = 1.25
     max_repairs: int = 3
     proposal_attempts: int = 2
     mutation_attempts: int = 4
@@ -61,8 +69,12 @@ class RunConfig:
     max_prompt_chars: int = 200000
     max_llm_calls: int = 200
     reflection_enabled: bool = True
-    breakthrough_delta: float = .01
-    collapse_delta: float = -.01
+    # Calibrated to observed parent-relative deltas on this benchmark, where a
+    # real single-step gain is ~1e-3. The previous .01/-.01 pair never fired.
+    # Both sit above SearchConfig.promotion_threshold: promotion is free, a
+    # reflection costs a model call. Saved runs keep their recorded values.
+    breakthrough_delta: float = .0005
+    collapse_delta: float = -.001
 
     def __post_init__(self):
         for name in ("run_dir", "template_dir", "environment_dir", "data_dir", "wheelhouse"):
@@ -75,13 +87,15 @@ class RunConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.max_repairs) is not int or self.max_repairs < 0:
             raise ValueError("max_repairs must be nonnegative")
-        for name in ("candidate_timeout_s", "final_reserve_s", "breakthrough_delta", "collapse_delta"):
+        for name in ("candidate_timeout_s", "final_reserve_s", "candidate_headroom",
+                     "breakthrough_delta", "collapse_delta"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value):
                 raise ValueError(f"Invalid {name}")
         if (self.candidate_timeout_s <= 0 or not 0 <= self.final_reserve_s < self.search.max_wall_clock_s
+                or self.candidate_headroom < 0
                 or self.breakthrough_delta <= 0 or self.collapse_delta >= 0):
-            raise ValueError("Invalid timeout, reserve, or reflection thresholds")
+            raise ValueError("Invalid timeout, reserve, headroom, or reflection thresholds")
 
 
 def _hash_files(paths):
@@ -361,12 +375,40 @@ class Orchestrator:
         self.state["execution"] = None
         self._stage("search")
 
+    def _typical_candidate_s(self):
+        """Median wall clock of the evaluated nodes, or 0.0 before any exist.
+
+        MetricResult.wall_clock_s already sums a candidate's repair executions,
+        and budget.allowance truncates late repairs, so the median is used
+        rather than a mean to absorb those outliers.
+        """
+        if self.tree is None:
+            return 0.0
+        durations = [n.metrics.wall_clock_s for n in self.tree.nodes.values()
+                     if n.metrics is not None]
+        return statistics.median(durations) if durations else 0.0
+
+    def _candidate_headroom_s(self):
+        """Time a fresh candidate typically needs, given what this run measured.
+
+        Capped at one candidate timeout so a slow run can never refuse an
+        attempt it could still afford in full.
+        """
+        return min(self.config.candidate_timeout_s,
+                   self.config.candidate_headroom * self._typical_candidate_s())
+
     def _search(self):
         reason = self.tree.stop_reason()
         if self.budget.remaining() <= 0:
             reason = "time_budget"
         elif self.state["llm_calls"] >= self.config.max_llm_calls:
             reason = "model_call_budget"
+        elif not reason and self.budget.remaining() < self._candidate_headroom_s():
+            # Starting a candidate that cannot finish burns the remaining budget
+            # and scores nothing; stop cleanly instead.
+            reason = "candidate_time_budget"
+            self._audit("search.headroom_stop", remaining_s=self.budget.remaining(),
+                        required_s=self._candidate_headroom_s())
         parent = None if reason else self.tree.select_parent()
         if reason or parent is None:
             self.state["stop_reason"] = reason or "exhausted"
@@ -422,6 +464,8 @@ class Orchestrator:
         context = json.dumps({"selected_parent_id": self._parent().node_id,
                               "selection": self.state.get("selection_decisions", {}).get(self.state["active"]),
                               "siblings": siblings, "remaining_seconds": self.budget.remaining(),
+                              "candidate_timeout_s": self.config.candidate_timeout_s,
+                              "typical_candidate_seconds": self._typical_candidate_s(),
                               "memory": self.memory.prompt_summary(self._context(),
                                   parent_commit_sha=self._parent().git_commit_sha,
                                   nodes=self.tree.nodes, selected_parent_id=self._parent().node_id)})

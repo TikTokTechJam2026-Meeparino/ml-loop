@@ -25,6 +25,15 @@ pruned), cross-branch memory, current configuration, and remaining budgets.
 Respect those budgets and the objective. Treat explanations of results as
 tentative hypotheses, not proven causes.
 
+Context reports candidate_timeout_s, the hard per-candidate limit on training
+and validation, alongside remaining_seconds and typical_candidate_seconds;
+lineage and sibling metrics report each experiment's wall_clock_s. Choose
+settings that finish well inside candidate_timeout_s, since exceeding it kills
+the candidate and scores nothing. Weigh added compute against the expected
+gain: a large slowdown for a marginal gain spends budget that later experiments
+need. Prefer a cheaper plausible change when remaining_seconds is close to
+typical_candidate_seconds.
+
 Choose a NEW experiment from this selected parent. Before selecting it, compare
 the intended behavior and concrete settings with every supplied sibling and
 relevant historical experiment. Do not repeat an already-tried transformation

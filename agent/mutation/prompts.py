@@ -60,7 +60,8 @@ OUTPUT FORMAT
 Output only edit blocks, with no introduction, explanation, Markdown headings,
 line numbers, or surrounding commentary. Above EVERY edit, write its filename
 on a separate line prefixed with FILE:, even for repeated edits to the same file.
-Use this exact structure (the example is illustrative, not a requested edit):
+Use this exact structure (the two example edits are illustrative, not requested
+edits):
 
 FILE: model.py
 ```python
@@ -73,6 +74,21 @@ class FactorizationMachine(nn.Module):
 >>>>>>> REPLACE
 ```
 
+FILE: model.py
+```python
+<<<<<<< SEARCH
+        self.linear = nn.Embedding(sum(field_dims), 1)
+=======
+        self.linear = nn.Embedding(sum(field_dims), 1)
+        self.dropout = nn.Dropout(0.1)
+>>>>>>> REPLACE
+```
+
+Both edits change the same file, so each repeats the FILE: line above its own
+fence; edits to different files follow the same pattern. Emit as many blocks as
+the change needs, in application order, separated by one blank line and nothing
+else. Never write a bare fence, a heading, or a sentence between blocks.
+
 The marker lines must be exactly <<<<<<< SEARCH, =======, and >>>>>>> REPLACE,
 without indentation. Each fenced block contains exactly one SEARCH/REPLACE
 edit. Use the appropriate language label, or text for other file types. If the
@@ -82,7 +98,8 @@ part of the payload. To include a trailing newline in SEARCH or REPLACE, add
 an extra blank line before its delimiter. Preserve internal line endings exactly.
 Do not include marker-only lines in source regions; choose smaller edit regions
 if source code itself contains these reserved markers.
-Separate consecutive edits with a blank line. Do not output entire files unless
+Separate consecutive edits with a single blank line and no other text. Do not
+output entire files unless
 the edit genuinely replaces the entire file. If the requirements are already
 satisfied and no edits are necessary, output exactly NO_CHANGES.
 """
@@ -170,7 +187,8 @@ def build_edit_messages(requirements: str, files: Mapping[str, str], *,
                 "any previously valid edits. Do not return only the missing markers or a "
                 "continuation. Copy each SEARCH from the original source, accounting for earlier "
                 "edits within your new response. Keep all three marker lines inside one code "
-                "fence per edit. Use this structure (illustrative only):\n\n"
+                "fence per edit. Repeat the FILE: line above every fence, including "
+                "consecutive edits to the same file. Use this structure (illustrative only):\n\n"
                 "FILE: model.py\n```python\n<<<<<<< SEARCH\ndim=16\n=======\n"
                 "dim=32\n>>>>>>> REPLACE\n```\n\n"
                 "Output only complete edit blocks, or NO_CHANGES if no edits are needed."

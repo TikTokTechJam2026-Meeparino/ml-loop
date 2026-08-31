@@ -1,8 +1,14 @@
 """Deterministic best-first allocation; no model calls or filesystem access."""
 
+import math
 from dataclasses import dataclass
 
 from agent.graph.node import NodeStatus
+
+
+def _exceeds(delta: float, threshold: float) -> bool:
+    """Strict gain past a threshold; an exact-threshold result stays a tie."""
+    return delta > threshold and not math.isclose(delta, threshold, rel_tol=0, abs_tol=1e-12)
 
 
 @dataclass
@@ -68,9 +74,18 @@ class BestFirstState:
             self.detour_remaining = config.detour_attempts
             self.detour_parent_id = parent_id
 
-    def complete(self, node, nodes):
+    def complete(self, node, nodes, config):
+        """Record one finished attempt against the incumbent.
+
+        Only a gain larger than config.promotion_threshold moves the incumbent.
+        A smaller gain is an ordinary completed evaluation: it falls through to
+        the detour or stagnation branch below and stays in the archive, so
+        best_node() can still select it as the final pipeline.
+        """
         incumbent = nodes[self.incumbent_id]
-        if node.metrics is not None and node.metrics.val_primary > incumbent.metrics.val_primary:
+        if node.metrics is not None and _exceeds(
+                node.metrics.val_primary - incumbent.metrics.val_primary,
+                config.promotion_threshold):
             self.incumbent_id = node.node_id
             self.stagnant_evaluations = 0
             self.detour_remaining = 0

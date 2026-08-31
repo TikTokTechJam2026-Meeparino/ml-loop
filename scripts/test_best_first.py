@@ -179,11 +179,55 @@ class BestFirstTests(unittest.TestCase):
                                        incoming_edge=EdgeAction('x', 'x')))
         self.assertEqual(asdict(search.selection), before)
 
+    def test_sub_threshold_gain_is_archived_but_not_promoted(self):
+        search = tree(promotion_threshold=1e-4, stagnation_patience=3)
+        finish(search, 'noise', .6 + 5e-5)
+        self.assertEqual(search.selection.incumbent_id, 'root')
+        self.assertEqual(search.selection.stagnant_evaluations, 1)
+        # Not the incumbent, but still the archive best and still selectable.
+        self.assertEqual(search.best_node().node_id, 'noise')
+        self.assertEqual(search.select_parent().node_id, 'root')
+        finish(search, 'exact', .6 + 1e-4)  # Exactly at the threshold: a tie.
+        self.assertEqual(search.selection.incumbent_id, 'root')
+        finish(search, 'real', .6 + 2e-4)
+        self.assertEqual(search.selection.incumbent_id, 'real')
+        self.assertEqual(search.selection.stagnant_evaluations, 0)
+        search._validate_checkpoint()
+
+    def test_sub_threshold_gain_still_consumes_a_detour_attempt(self):
+        search = tree(stagnation_patience=1, promotion_threshold=1e-3)
+        finish(search, 'winner', .61)
+        finish(search, 'loser', .605)
+        finish(search, 'detour1', .606)
+        self.assertEqual(search.selection.detour_parent_id, 'detour1')
+        finish(search, 'detour2', .6105)  # +0.0005 over the incumbent: below threshold.
+        self.assertEqual(search.selection.incumbent_id, 'winner')
+        self.assertTrue(search.selection.review_required)
+        self.assertEqual(search.best_node().node_id, 'detour2')
+        search._validate_checkpoint()
+
+    def test_saved_runs_keep_the_original_promotion_rule(self):
+        self.assertEqual(SearchConfig().promotion_threshold, 1e-4)
+        self.assertEqual(SearchConfig.from_saved({'strategy': 'best_first'}).promotion_threshold, 0.0)
+        search = tree(promotion_threshold=0.0)
+        finish(search, 'noise', .6 + 5e-5)
+        self.assertEqual(search.selection.incumbent_id, 'noise')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'tree.json'
+            search.save(path)
+            payload = json.loads(path.read_text())
+            payload['config'].pop('promotion_threshold')  # A checkpoint predating the field.
+            path.write_text(json.dumps(payload))
+            loaded = SearchTree.load(path)
+            self.assertEqual(loaded.config.promotion_threshold, 0.0)
+            self.assertEqual(loaded.selection.incumbent_id, 'noise')
+
     def test_config_validation(self):
         self.assertEqual(SearchConfig().strategy, 'best_first')
         self.assertEqual(SearchConfig.from_saved({}).strategy, 'uct')
         for kwargs in ({'strategy': 'unknown'}, {'detour_attempts': 0}, {'max_detours': -1},
-                       {'max_detours': True}, {'stagnation_patience': True}):
+                       {'max_detours': True}, {'stagnation_patience': True},
+                       {'promotion_threshold': -1}, {'promotion_threshold': float('nan')}):
             with self.assertRaises(ValueError):
                 SearchConfig(**kwargs)
 
