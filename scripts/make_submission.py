@@ -36,16 +36,42 @@ STARTER_KIT = ROOT / "data" / "kuairand-pure" / "starter-kit"
 HEADER = ["row_id", "user_id", "video_id", "score"]
 
 
-def final_test_predictions(run_dir: Path) -> tuple[Path, dict]:
-    """Locate the predictions the run's own report attributes to its final test."""
+def predictions_for(run_dir: Path, split: str) -> tuple[Path, dict]:
+    """Locate the selected pipeline's predictions for one split.
+
+    The report attributes the test predictions to its final test. Validation
+    predictions come from the selected node's own evaluation, identified by the
+    split recorded in that execution's result.json rather than assumed from
+    ordering, so the file always matches the split it is aligned against.
+    """
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-    final = report.get("final_test") or {}
-    if final.get("status") != "success":
-        raise SystemExit(f"{run_dir}: final test did not succeed ({final.get('status')})")
-    path = Path(final["artifact_dir"]) / "predictions.npy"
-    if not path.exists():
-        raise SystemExit(f"Missing predictions: {path}")
-    return path, final
+    if split == "test":
+        final = report.get("final_test") or {}
+        if final.get("status") != "success":
+            raise SystemExit(f"{run_dir}: final test did not succeed ({final.get('status')})")
+        path = Path(final["artifact_dir"]) / "predictions.npy"
+        if not path.exists():
+            raise SystemExit(f"Missing predictions: {path}")
+        return path, final
+
+    selected_id = report.get("selected_node_id")
+    selected = next((n for n in report["nodes"] if n["node_id"] == selected_id), None)
+    if selected is None:
+        raise SystemExit(f"{run_dir}: report names no selected node")
+    for key, value in (selected.get("artifacts") or {}).items():
+        if key == "final_test" or not str(key).startswith(("execution", "latest_execution")):
+            continue
+        folder = Path(value)
+        result = folder / "result.json"
+        predictions = folder / "predictions.npy"
+        if not (result.exists() and predictions.exists()):
+            continue
+        payload = json.loads(result.read_text(encoding="utf-8"))
+        if payload.get("split") == split and payload.get("status") == "success":
+            summary = dict(payload)
+            summary["node_id"] = selected_id
+            return predictions, summary
+    raise SystemExit(f"{run_dir}: no successful {split} execution retained for {selected_id}")
 
 
 def main() -> int:
@@ -56,7 +82,7 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
 
-    predictions_path, final = final_test_predictions(args.run_dir)
+    predictions_path, final = predictions_for(args.run_dir, args.split)
     scores = np.load(predictions_path)
 
     sys.path.insert(0, str(STARTER_KIT))
