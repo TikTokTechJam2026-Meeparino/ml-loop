@@ -125,7 +125,8 @@ class OrchestratorTests(unittest.TestCase):
         obj, client, runner = self.run_with(
             [PROPOSAL, edit('dim=16', 'dim=32'),
              PROPOSAL, edit('dim=32', 'dim=48'),
-             PROPOSAL, edit('dim=48', 'dim=64'),
+             # node_003 detours to genesis, so its edit starts from dim=16.
+             PROPOSAL, edit('dim=16', 'dim=64'),
              PROPOSAL, edit('dim=64', 'dim=80')], [.5, .6, .55, .4, .45, .58])
         runner.interrupt_after = 4
         with self.assertRaises(KeyboardInterrupt):
@@ -139,7 +140,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(report['completed_iterations'], 4)
         self.assertEqual(report['selected_node_id'], 'node_001')
         self.assertEqual([n['parent_id'] for n in report['nodes'][1:]],
-                         ['genesis', 'node_001', 'node_002', 'node_003'])
+                         ['genesis', 'node_001', 'genesis', 'node_003'])
         self.assertEqual(report['selection_decisions']['node_003']['reason'], 'detour_start')
         self.assertEqual(report['selection_decisions']['node_004']['reason'], 'detour_continue')
         self.assertTrue(report['search_selection']['review_required'])

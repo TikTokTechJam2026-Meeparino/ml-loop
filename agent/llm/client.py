@@ -38,7 +38,8 @@ class LLMConfig:
             raise ValueError("Profile timeout must be finite and positive.")
         if self.max_retries < 0 or self.max_tokens <= 0:
             raise ValueError("Retries must be nonnegative and max tokens positive.")
-        if self.reasoning_effort not in {None, "none", "minimal", "low", "medium", "high"}:
+        if self.reasoning_effort not in {None, "none", "minimal", "low", "medium",
+                                         "high", "xhigh", "max"}:
             raise ValueError("Invalid profile reasoning effort")
 
     @classmethod

@@ -35,9 +35,12 @@ class SearchConfig:
     stagnation_patience: int = 5
     detour_attempts: int = 2
     max_detours: int = 1
-    # Best-first setting; ignored by uct. Gains at or below this are ties, so a
-    # noise-scale result cannot make an expensive candidate the new incumbent.
+    # Best-first settings; ignored by uct. Gains at or below the threshold are
+    # ties, so a noise-scale result cannot make an expensive candidate the new
+    # incumbent. Detours skip the incumbent's parent and siblings instead of its
+    # ancestry chain, keeping deeper ancestors such as genesis eligible.
     promotion_threshold: float = 1e-4
+    detour_allows_ancestors: bool = True
 
     def __post_init__(self) -> None:
         if self.strategy not in ("best_first", "uct"):
@@ -48,6 +51,8 @@ class SearchConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.max_detours) is not int or self.max_detours < 0:
             raise ValueError("max_detours must be a nonnegative integer")
+        if type(self.detour_allows_ancestors) is not bool:
+            raise ValueError("detour_allows_ancestors must be a boolean")
         for name in ("exploration_weight", "improvement_threshold", "max_wall_clock_s",
                      "prune_delta", "promotion_threshold"):
             _finite(getattr(self, name), name)
@@ -64,10 +69,13 @@ class SearchConfig:
 
         Old runs remain UCT even though new runs default to best-first. Runs
         recorded before the promotion threshold existed keep promoting on any
-        strict improvement: their saved selection history was produced under
-        that rule and no longer replays under a nonzero threshold.
+        strict improvement, and runs recorded before detours could reach
+        ancestors keep the old ancestry-chain exclusion: their saved selection
+        history was produced under those rules and no longer replays without
+        them.
         """
-        return cls(**{"strategy": "uct", "promotion_threshold": 0.0, **raw})
+        return cls(**{"strategy": "uct", "promotion_threshold": 0.0,
+                      "detour_allows_ancestors": False, **raw})
 
 
 def _finite(value: float, name: str) -> None:

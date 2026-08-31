@@ -36,9 +36,10 @@ class BestFirstState:
     def choice(self, nodes, config):
         """Return (parent, reason) without reserving or consuming any budget.
 
-        Other lineages are a cheap diversity proxy, not a claim that their
-        architectures differ. Prefer their best score, then fall back to the
-        best distinct checkpoint anywhere in the archive. Ties retain order.
+        Tree distance is a cheap diversity proxy, not a claim that the
+        architectures differ. Prefer the best score outside the incumbent's
+        neighbourhood, then fall back to the best distinct checkpoint anywhere
+        in the archive. Ties retain order.
         """
         if self.review_required:
             return None, "detour_exhausted"
@@ -62,9 +63,23 @@ class BestFirstState:
                 node = nodes.get(node.parent_id)
             return result
 
-        lineage = ancestors(incumbent)
-        alternatives = [n for n in candidates if n.node_id not in lineage
-                        and incumbent.node_id not in ancestors(n)]
+        outside = [n for n in candidates if incumbent.node_id not in ancestors(n)]
+        if config.detour_allows_ancestors:
+            # A detour should leave the incumbent's immediate neighbourhood, not
+            # merely its direct line. Its parent and siblings are usually the
+            # same architecture with one setting changed, so excluding only the
+            # ancestry chain sends the detour to a near-identical sibling. A
+            # deeper ancestor - genesis above all - is a clean base for a
+            # different direction, and stays eligible here. The neighbourhood is
+            # a preference, not a filter: in a shallow tree it can exclude every
+            # option, and a weaker distant node still beats the incumbent's own
+            # subtree.
+            near = {incumbent.parent_id} | {n.node_id for n in nodes.values()
+                                            if n.parent_id == incumbent.parent_id}
+            alternatives = [n for n in outside if n.node_id not in near] or outside
+        else:
+            lineage = ancestors(incumbent)
+            alternatives = [n for n in outside if n.node_id not in lineage]
         parent = max(alternatives or candidates, key=lambda n: n.metrics.val_primary)
         return parent, "detour_start"
 

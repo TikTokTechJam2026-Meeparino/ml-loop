@@ -61,9 +61,11 @@ class BestFirstTests(unittest.TestCase):
             self.assertEqual(search.select_parent().node_id, 'winner')
             finish(search, f'loss{i}', .605)
         self.assertEqual(search.selection.detours_started, 0)
-        self.assertEqual(search.select_parent().node_id, 'loss0')
+        # Every loss is a child of the incumbent, so the detour leaves its
+        # subtree for the root rather than descending further into it.
+        self.assertEqual(search.select_parent().node_id, 'root')
         for _ in range(3):
-            self.assertEqual(search.select_parent().node_id, 'loss0')
+            self.assertEqual(search.select_parent().node_id, 'root')
         self.assertEqual(search.selection.detours_started, 0)  # Reads never consume budget.
         first = finish(search, 'detour1', .50)
         self.assertEqual(search.selection.detours_started, 1)
@@ -95,14 +97,17 @@ class BestFirstTests(unittest.TestCase):
         finish(search, 'loser', .605)
         before = search.nodes['loser'].visit_count
         finish(search, 'broken1', None)
-        self.assertEqual(search.select_parent().node_id, 'loser')
+        # 'loser' is a descendant of the incumbent, so the detour takes the root
+        # instead and retries it; failed attempts still leave 'loser' untouched.
+        self.assertEqual(search.select_parent().node_id, 'root')
         finish(search, 'broken2', None)
         self.assertEqual(search.nodes['loser'].visit_count, before)
         self.assertEqual(search.stop_reason(), 'stagnation')
         self.assertEqual(search.iteration_count, 4)
 
     def test_other_lineage_preferred_and_same_commit_excluded(self):
-        search = tree(stagnation_patience=2)
+        """Legacy policy: the ancestry chain, root included, is ineligible."""
+        search = tree(stagnation_patience=2, detour_allows_ancestors=False)
         finish(search, 'alternative', .59)  # Sibling of winner.
         finish(search, 'winner', .61)
         finish(search, 'descendant', .605)
@@ -110,6 +115,22 @@ class BestFirstTests(unittest.TestCase):
         self.assertEqual(search.select_parent().node_id, 'alternative')
         search.nodes['alternative'].git_commit_sha = search.nodes['winner'].git_commit_sha
         self.assertEqual(search.select_parent().node_id, 'descendant')
+
+    def test_detour_prefers_root_over_a_sibling_and_never_its_own_subtree(self):
+        """Current policy on the same shape: root outscores the sibling.
+
+        'alternative' is a sibling of the incumbent, so the neighbourhood rule
+        skips it and the root becomes the clean base. Once the root is the only
+        option left it is still chosen ahead of the incumbent's descendants.
+        """
+        search = tree(stagnation_patience=2)
+        finish(search, 'alternative', .59)
+        finish(search, 'winner', .61)
+        finish(search, 'descendant', .605)
+        finish(search, 'descendant2', .604)
+        self.assertEqual(search.select_parent().node_id, 'root')
+        search.nodes['alternative'].git_commit_sha = search.nodes['winner'].git_commit_sha
+        self.assertEqual(search.select_parent().node_id, 'root')
 
     def test_budget_and_no_unbounded_detour_cycles(self):
         search = tree(stagnation_patience=1, max_iterations=3)
@@ -222,12 +243,38 @@ class BestFirstTests(unittest.TestCase):
             self.assertEqual(loaded.config.promotion_threshold, 0.0)
             self.assertEqual(loaded.selection.incumbent_id, 'noise')
 
+    def test_detour_leaves_the_incumbent_neighbourhood(self):
+        """A detour must skip the incumbent's parent and siblings.
+
+        Mirrors storage/live-50-002, where excluding only the ancestry chain
+        sent the detour to a near-identical sibling while the architecturally
+        distinct grandparent stayed ineligible.
+        """
+        from agent.graph.selection import BestFirstState
+        shape = {'root': (None, .60), 'gp': ('root', .6035), 'parent': ('gp', .6036),
+                 'sib': ('parent', .6036), 'inc': ('parent', .6042)}
+        nodes = {name: SearchNode(name, parent_id=par, status=NodeStatus.SUCCESS,
+                                  metrics=score(value),
+                                  git_commit_sha=hashlib.sha1(name.encode()).hexdigest())
+                 for name, (par, value) in shape.items()}
+        for allows, expected in ((False, 'sib'), (True, 'gp')):
+            config = SearchConfig(stagnation_patience=1, detour_allows_ancestors=allows)
+            state = BestFirstState('inc', stagnant_evaluations=1)
+            parent, reason = state.choice(nodes, config)
+            self.assertEqual((parent.node_id, reason), (expected, 'detour_start'))
+
+    def test_saved_runs_keep_the_ancestry_chain_exclusion(self):
+        self.assertIs(SearchConfig().detour_allows_ancestors, True)
+        self.assertIs(SearchConfig.from_saved({'strategy': 'best_first'}).detour_allows_ancestors,
+                      False)
+
     def test_config_validation(self):
         self.assertEqual(SearchConfig().strategy, 'best_first')
         self.assertEqual(SearchConfig.from_saved({}).strategy, 'uct')
         for kwargs in ({'strategy': 'unknown'}, {'detour_attempts': 0}, {'max_detours': -1},
                        {'max_detours': True}, {'stagnation_patience': True},
-                       {'promotion_threshold': -1}, {'promotion_threshold': float('nan')}):
+                       {'promotion_threshold': -1}, {'promotion_threshold': float('nan')},
+                       {'detour_allows_ancestors': 1}, {'detour_allows_ancestors': 'yes'}):
             with self.assertRaises(ValueError):
                 SearchConfig(**kwargs)
 

@@ -197,11 +197,19 @@ archive, and failed implementations do not lower parent scores or add
 zero-reward visits.
 
 After `stagnation_patience=5` successfully evaluated candidates without a new
-global best, start a detour. Prefer the highest-scoring alternative outside the
-incumbent's ancestor/descendant chain; if none exists, use the highest-scoring
-distinct checkpoint elsewhere in the archive. Equal scores retain insertion
-order; identical incumbent commit hashes are excluded. Ancestry is a cheap
-diversity proxy, **not an architecture classifier**. The detour has at most
+global best, start a detour. Prefer the highest-scoring node outside the
+incumbent's subtree and outside its immediate neighbourhood — its parent and
+siblings, which usually differ by a single setting. Deeper ancestors stay
+eligible, so genesis remains available as a clean base for a different
+direction; excluding the whole ancestry chain instead sent detours to
+near-identical siblings. The neighbourhood is a preference, not a filter: where
+it excludes every option the best remaining node outside the subtree is used,
+and only if that is empty does the search fall back to the highest-scoring
+distinct checkpoint anywhere. Equal scores retain insertion order; identical
+incumbent commit hashes are excluded. Set `detour_allows_ancestors=false` for
+the older ancestry-chain rule; runs saved before this setting existed keep it
+automatically. Tree distance is a cheap diversity proxy, **not an architecture
+classifier**. The detour has at most
 `detour_attempts=2` attempts, including failed implementations. Its next attempt
 builds on its latest valid candidate even if that candidate is worse than its
 parent or the global best; a failed attempt leaves the detour parent unchanged.
@@ -1008,6 +1016,11 @@ Each profile accepts `API_KEY`, `API_BASE`, `REASONING_EFFORT`, `TIMEOUT`,
 `MAX_RETRIES`, and `MAX_TOKENS` suffixes. There are no shared environment settings or credential fallbacks. Set each
 profile independently; if both use the same provider, their keys may be identical.
 Blank optional settings use code defaults; blank API_BASE selects the provider default. Never commit `.env`.
+`REASONING_EFFORT` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+and `max`; the provider rejects a level its model does not support. `xhigh` sits
+between `high` and `max` and suits agentic proposal work, so the high profile
+uses it — proposals are roughly a third of a run's model calls, which keeps the
+cost modest.
 The template sets high/low reasoning and a 180-second high-profile timeout.
 Model fields are blank until you choose explicit LiteLLM provider/model IDs.
 
