@@ -15,7 +15,31 @@ candidate workspace commit `52a281a3146b4b40cc5f2c9f11a8d7c22b164b9f`.
 | `submission-valid.csv` | 3.1 MB | Same model on the validation split, 124,909 rows. Supporting evidence only. Validation is the split the search was permitted to use while selecting candidates; test was held back for the selected pipeline alone. |
 | `checkpoint.pkl` | 71.5 MB | The trained model, byte-identical to the run's own artifact. |
 | `pipeline/` | 29 KB | The five editable pipeline files exactly as the selected model left them. |
+| `logs/` | 5.3 MB | Per-iteration run logs and raw event logs for all four runs. |
 | `SHA256SUMS.txt` | — | Checksums for every file above. |
+
+## Run and iteration logs
+
+`logs/run-N/` holds two views of each of the four runs in the sequence:
+
+| File | What it is |
+|---|---|
+| `RUN_LOG.md` | The per-iteration log. One section per candidate with the hypothesis the agent formed and why, the diff that implemented it, the resulting GAUC / nDCG@5 / Primary, and any error or recovery event with how it was handled. Opens with the run summary and its manual-intervention count. |
+| `events.jsonl` | The raw event stream the orchestrator and runner wrote as the run executed. One JSON object per line. |
+
+`logs/events-merged.jsonl` interleaves all seven event logs — the four runs plus three runs
+abandoned to a provider outage — into one chronological timeline. Each record keeps its original
+fields and gains a `collation` object naming its source directory and line, so any record traces
+back. This is the view that shows the outage cascade as a single sequence rather than as four
+unrelated failures.
+
+Run-1 is the run that produced the submitted model. Its log records 2 manual interventions, both
+resumes after provider outages; runs 2, 3 and 4 record 0 each.
+
+These logs carry no prompts, provider responses, or credentials. Full request and response bodies
+are written to separate per-run `diagnostics/` artifacts that stay local; the event stream only
+references them by path. Those paths are absolute and therefore disclose the local working
+directory of the machine that ran the search.
 
 ## The checkpoint
 
