@@ -9,14 +9,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.graph.node import EdgeAction, MetricResult, NodeStatus, SearchNode
-from agent.graph.tree import SearchTree
+from agent.graph.tree import SearchConfig, SearchTree
 from agent.reporting import FinalTestResult, build_report, write_report
 
 
 class ReportingTests(unittest.TestCase):
     def setUp(self):
         self.tree = SearchTree(SearchNode("root", status=NodeStatus.SUCCESS,
-                                         metrics=MetricResult(.5, .5, .5, 1), git_commit_sha="a" * 40))
+                                         metrics=MetricResult(.5, .5, .5, 1), git_commit_sha="a" * 40),
+                               SearchConfig(strategy="uct"))
         for name, score in (("better", .6), ("failed", None)):
             self.tree.add_node(SearchNode(name, parent_id="root", depth=1,
                                           incoming_edge=EdgeAction(name, "Try capacity")))

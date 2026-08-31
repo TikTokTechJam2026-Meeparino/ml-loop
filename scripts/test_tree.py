@@ -20,7 +20,7 @@ def metrics(score):
 def make_tree(**kwargs):
     return SearchTree(SearchNode('root', status=NodeStatus.SUCCESS,
                                  metrics=metrics(0.5), git_commit_sha='a' * 40),
-                      SearchConfig(**kwargs))
+                      SearchConfig(strategy="uct", **kwargs))
 
 
 def candidate(tree, name, parent='root'):

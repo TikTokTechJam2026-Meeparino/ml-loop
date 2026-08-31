@@ -76,7 +76,9 @@ class SearchNode:
     The repository location is supplied by the run's GitDriver.
 
     visit_count and value_sum describe backed-up search rewards, separate
-    from this candidate's validation metrics. uct_value is an optional cache,
+    from this candidate's validation metrics. Best-first counts successful
+    evaluations only; legacy UCT also counts failures with zero reward.
+    Best-first selection ignores these statistics. uct_value is an optional cache,
     not an authoritative statistic: tree.py must refresh it when selection
     inputs change, including the parent's visit count. None means uncomputed.
     No visits or rewards are recorded automatically on construction.

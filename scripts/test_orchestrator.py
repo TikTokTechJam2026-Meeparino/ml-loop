@@ -109,7 +109,7 @@ class OrchestratorTests(unittest.TestCase):
         self.config = replace(self.config, search=SearchConfig(max_iterations=2))
         obj, client, _ = self.run_with(
             [PROPOSAL, edit("dim=16", "dim=32"), PROPOSAL, edit("dim=16", "dim=24")],
-            [.5, .6, .55, .6])
+            [.5, .49, .55, .6])
         obj.run()
         prompt = client.requests[2].messages[1]['content']
         payload = json.loads(prompt.split('EXPERIMENT EVIDENCE (JSON)\n', 1)[1].split('\n\n', 1)[0])
@@ -119,6 +119,58 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(context['siblings'][0]['relationship'], 'same_parent')
         self.assertIn('genesis -> node_001', context['memory'])
         self.assertIn('relationship=same_parent', context['memory'])
+
+    def test_best_first_detour_resume_and_stagnation_finalize_once(self):
+        self.config = replace(self.config, search=SearchConfig(max_iterations=20, stagnation_patience=1))
+        obj, client, runner = self.run_with(
+            [PROPOSAL, edit('dim=16', 'dim=32'),
+             PROPOSAL, edit('dim=32', 'dim=48'),
+             PROPOSAL, edit('dim=48', 'dim=64'),
+             PROPOSAL, edit('dim=64', 'dim=80')], [.5, .6, .55, .4, .45, .58])
+        runner.interrupt_after = 4
+        with self.assertRaises(KeyboardInterrupt):
+            obj.run()
+        state, tree, _ = RunStore(self.run_dir).load()
+        self.assertEqual(state['active'], 'node_003')
+        self.assertEqual(tree.selection.detour_remaining, 2)
+        runner.interrupt_after = None
+        report = Orchestrator.resume(self.run_dir, client=client, runner=runner, splits=SPLITS)
+        self.assertEqual(report['stop_reason'], 'stagnation')
+        self.assertEqual(report['completed_iterations'], 4)
+        self.assertEqual(report['selected_node_id'], 'node_001')
+        self.assertEqual([n['parent_id'] for n in report['nodes'][1:]],
+                         ['genesis', 'node_001', 'node_002', 'node_003'])
+        self.assertEqual(report['selection_decisions']['node_003']['reason'], 'detour_start')
+        self.assertEqual(report['selection_decisions']['node_004']['reason'], 'detour_continue')
+        self.assertTrue(report['search_selection']['review_required'])
+        self.assertEqual(len(runner.calls), 6)  # Completed result recovered, not retrained.
+        self.assertEqual(len(client.requests), 8)
+
+    def test_legacy_run_config_resumes_as_uct(self):
+        self.config = replace(self.config, search=SearchConfig(strategy='uct', max_iterations=2))
+        obj, client, runner = self.run_with(
+            [PROPOSAL, edit('dim=16', 'dim=32'), PROPOSAL, edit('dim=16', 'dim=24')],
+            [.5, .6, .55, .58])
+        runner.interrupt_after = 2
+        with self.assertRaises(KeyboardInterrupt):
+            obj.run()
+        pointer = json.loads((self.run_dir / 'current.json').read_text())
+        folder = self.run_dir / 'snapshots' / pointer['generation']
+        for filename in ('state.json', 'tree.json'):
+            path = folder / filename
+            payload = json.loads(path.read_text())
+            config = payload['config']['search'] if filename == 'state.json' else payload['config']
+            for key in ('strategy', 'stagnation_patience', 'detour_attempts', 'max_detours'):
+                config.pop(key)
+            if filename == 'tree.json':
+                payload['version'] = 1
+                payload.pop('selection')
+            path.write_text(json.dumps(payload))
+        runner.interrupt_after = None
+        report = Orchestrator.resume(self.run_dir, client=client, runner=runner, splits=SPLITS)
+        self.assertEqual(report['config']['search']['strategy'], 'uct')
+        self.assertEqual(report['nodes'][2]['parent_id'], 'genesis')
+        self.assertEqual(report['selected_node_id'], 'node_001')
 
     def test_repair_and_reflection_handoff(self):
         from dataclasses import replace

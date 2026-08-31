@@ -1,4 +1,4 @@
-"""Single-parent UCT search, candidate accounting, and JSON checkpoints.
+"""Single-parent experiment history, selectable allocation, and checkpoints.
 
 The tree owns registered nodes: callers must use its methods for topology and
 completion updates. A candidate iteration ends at record_result(), including
@@ -18,10 +18,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent.graph.node import EdgeAction, MetricResult, NodeStatus, RecoveryEvent, SearchNode
+from agent.graph.selection import BestFirstState
 
 
 @dataclass(frozen=True)
 class SearchConfig:
+    # Legacy UCT settings; ignored by best_first.
     exploration_weight: float = math.sqrt(2.0)
     max_children: int = 3
     prune_delta: float = -0.01
@@ -29,18 +31,31 @@ class SearchConfig:
     patience: int = 3
     max_iterations: int = 50
     max_wall_clock_s: float = 6 * 60 * 60
+    strategy: str = "best_first"
+    stagnation_patience: int = 5
+    detour_attempts: int = 2
+    max_detours: int = 1
 
     def __post_init__(self) -> None:
-        for name in ("max_children", "patience", "max_iterations"):
+        if self.strategy not in ("best_first", "uct"):
+            raise ValueError("Unknown search strategy")
+        for name in ("max_children", "patience", "max_iterations", "stagnation_patience", "detour_attempts"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if type(self.max_detours) is not int or self.max_detours < 0:
+            raise ValueError("max_detours must be a nonnegative integer")
         for name in ("exploration_weight", "improvement_threshold", "max_wall_clock_s", "prune_delta"):
             _finite(getattr(self, name), name)
         if self.exploration_weight < 0 or self.improvement_threshold < 0:
             raise ValueError("Exploration weight and improvement threshold must be nonnegative")
         if self.max_wall_clock_s <= 0 or self.prune_delta >= 0:
             raise ValueError("Time budget must be positive and prune_delta negative")
+
+    @classmethod
+    def from_saved(cls, raw):
+        """Old runs remain UCT even though new runs default to best-first."""
+        return cls(**{"strategy": "uct", **raw})
 
 
 def _finite(value: float, name: str) -> None:
@@ -69,13 +84,11 @@ def _commit(commit: str | None) -> None:
 
 
 class SearchTree:
-    """Bounded, sequential UCT search over evaluated pipeline states.
+    """Sequential registry with best-first detours or legacy UCT allocation.
 
-    Each selected parent can spawn up to max_children attempts (failures count).
-    Selection expands a node with available slots before descending by UCT.
-    Exhausted subtrees are skipped, providing backtracking without deleting
-    history. Use one in-flight candidate at a time; parallel MCTS would require
-    path reservations/virtual loss and is deliberately not implemented here.
+    Best-first uses each model's own score, without child caps or automatic
+    pruning. Legacy UCT preserves its expansion, backup, and pruning behavior.
+    Both strategies permit only one active attempt and share hard budgets.
     """
 
     def __init__(self, root: SearchNode, config: SearchConfig | None = None,
@@ -95,6 +108,7 @@ class SearchTree:
         _finite(self.started_at, "started_at")
         self.completed_ids: list[str] = []
         self.best_history: list[float] = [root.metrics.val_primary]
+        self.selection = BestFirstState(root.node_id) if self.config.strategy == "best_first" else None
 
     @property
     def iteration_count(self) -> int:
@@ -146,6 +160,8 @@ class SearchTree:
             n.status in (NodeStatus.PENDING, NodeStatus.RUNNING) for n in self.nodes.values()
         ):
             return None
+        if self.selection is not None:
+            return self.selection.choice(self.nodes, self.config)[0]
         available = self._expandable_subtrees()
         if self.root_id not in available:
             return None
@@ -155,6 +171,14 @@ class SearchTree:
             # Stable insertion-order tie breaking makes resumed selection repeatable.
             node = max(candidates, key=lambda n: self.uct_score(n.node_id))
         return node
+
+    def selection_status(self):
+        """Serializable allocation evidence for checkpoints, logs and prompts."""
+        if self.selection is None:
+            return {"strategy": "uct"}
+        parent, reason = self.selection.choice(self.nodes, self.config)
+        return {"strategy": "best_first", **asdict(self.selection),
+                "next_parent_id": parent.node_id if parent else None, "reason": reason}
 
     def add_node(self, node: SearchNode, *, now: float | None = None) -> None:
         """Register one fresh pending attempt and atomically link it to its parent."""
@@ -169,13 +193,18 @@ class SearchTree:
         parent = self.nodes[node.parent_id]
         if any(n.status != NodeStatus.SUCCESS for n in self.get_lineage_chain(parent.node_id)):
             raise ValueError("Parent lineage must be successful and unpruned")
-        if len(parent.children_ids) >= self.config.max_children:
+        if self.selection is None and len(parent.children_ids) >= self.config.max_children:
             raise ValueError("Parent has exhausted its child slots")
         if node.depth != parent.depth + 1 or not isinstance(node.incoming_edge, EdgeAction):
             raise ValueError("Candidate requires matching depth and an incoming edge")
         if (node.status != NodeStatus.PENDING or node.children_ids or node.metrics is not None
                 or node.visit_count != 0 or node.value_sum != 0 or node.uct_value is not None):
             raise ValueError("Candidate must have fresh pending state")
+        if self.selection is not None:
+            selected, reason = self.selection.choice(self.nodes, self.config)
+            if selected is None or parent.node_id != selected.node_id:
+                raise ValueError("Parent differs from the best-first allocation")
+            self.selection.reserve(parent.node_id, reason, self.config)
         self.nodes[node.node_id] = node
         parent.children_ids.append(node.node_id)
 
@@ -189,9 +218,8 @@ class SearchTree:
                       *, git_commit_sha: str | None = None) -> None:
         """Finish an attempt exactly once; None metrics denotes unrecoverable failure.
 
-        Back up absolute validation Primary (zero for failure) through the
-        candidate and all ancestors. Failed attempts do not invalidate parents.
-        Successful evaluations are backed up even when subsequently pruned.
+        Only UCT treats failures as zero-reward visits. Best-first records
+        successful evaluation statistics only; selection uses own model scores.
         """
         node = self.nodes[node_id]
         if node.status not in (NodeStatus.PENDING, NodeStatus.RUNNING):
@@ -205,20 +233,25 @@ class SearchTree:
         node.metrics = metrics
         node.status = NodeStatus.SUCCESS if metrics is not None else NodeStatus.FAILED
         reward = metrics.val_primary if metrics is not None else 0.0
-        for ancestor in chain:
-            ancestor.visit_count += 1
-            ancestor.value_sum += reward
+        if metrics is not None or self.selection is None:
+            for ancestor in chain:
+                ancestor.visit_count += 1
+                ancestor.value_sum += reward
         for registered in self.nodes.values():
             registered.uct_value = None
         self.completed_ids.append(node_id)
         self.best_history.append(max(self.best_history[-1], reward))
-        if metrics is not None:
+        if self.selection is not None:
+            self.selection.complete(node, self.nodes)
+        elif metrics is not None:
             delta = reward - self.nodes[node.parent_id].metrics.val_primary
             if delta < self.config.prune_delta and not math.isclose(delta, self.config.prune_delta, abs_tol=1e-12, rel_tol=0):
                 self.prune(node_id)
 
     def prune(self, node_id: str) -> None:
         """Disable an evaluated subtree, retaining metrics and failure statuses."""
+        if self.selection is not None:
+            raise ValueError("Best-first retains evaluated models without subtree pruning")
         if node_id == self.root_id:
             raise ValueError("Genesis cannot be pruned")
         subtree = []
@@ -253,6 +286,11 @@ class SearchTree:
             return "time_budget"
         if self.iteration_count >= self.config.max_iterations:
             return "iteration_budget"
+        if self.selection is not None:
+            if not any(n.status in (NodeStatus.PENDING, NodeStatus.RUNNING) for n in self.nodes.values()):
+                if self.selection.choice(self.nodes, self.config)[0] is None:
+                    return "stagnation"
+            return None
         if self.iteration_count >= self.config.patience:
             gain = self.best_history[-1] - self.best_history[-1 - self.config.patience]
             threshold = self.config.improvement_threshold
@@ -271,9 +309,10 @@ class SearchTree:
         """Atomically replace a versioned JSON checkpoint; no Git operations."""
         self._validate_checkpoint()
         payload = {
-            "version": 1, "config": asdict(self.config), "root_id": self.root_id,
+            "version": 2, "config": asdict(self.config), "root_id": self.root_id,
             "started_at": self.started_at, "completed_ids": self.completed_ids,
             "best_history": self.best_history,
+            "selection": asdict(self.selection) if self.selection is not None else None,
             "nodes": [dict(asdict(node), uct_value=None) for node in self.nodes.values()],
         }
         encoded = json.dumps(payload, indent=2, allow_nan=False)
@@ -298,7 +337,7 @@ class SearchTree:
         """
         with Path(path).open(encoding="utf-8") as stream:
             payload = json.load(stream)
-        if payload["version"] != 1:
+        if payload["version"] not in (1, 2):
             raise ValueError("Unsupported tree checkpoint version")
         nodes = {}
         for raw in payload["nodes"]:
@@ -317,10 +356,17 @@ class SearchTree:
         fresh_root = SearchNode(node_id=root.node_id, parent_id=root.parent_id,
                                 depth=root.depth, incoming_edge=root.incoming_edge,
                                 status=root.status, metrics=root.metrics, git_commit_sha=root.git_commit_sha)
-        tree = cls(fresh_root, SearchConfig(**payload["config"]), started_at=payload["started_at"])
+        config = SearchConfig.from_saved(payload["config"])
+        if payload["version"] == 1 and config.strategy != "uct":
+            raise ValueError("Version 1 checkpoints only support UCT")
+        tree = cls(fresh_root, config, started_at=payload["started_at"])
         tree.nodes = nodes
         tree.completed_ids = payload["completed_ids"]
         tree.best_history = payload["best_history"]
+        if config.strategy == "best_first":
+            tree.selection = BestFirstState(**payload["selection"])
+        elif payload.get("selection") is not None:
+            raise ValueError("UCT checkpoints cannot contain best-first state")
         tree._validate_checkpoint()
         return tree
 
@@ -338,7 +384,7 @@ class SearchTree:
                 raise ValueError("Invalid depth or visit count")
             if not isinstance(node.children_ids, list) or len(set(node.children_ids)) != len(node.children_ids):
                 raise ValueError("Invalid child list")
-            if len(node.children_ids) > self.config.max_children:
+            if self.selection is None and len(node.children_ids) > self.config.max_children:
                 raise ValueError("Child limit exceeded")
             for child_id in node.children_ids:
                 child = self.nodes[child_id]
@@ -371,12 +417,41 @@ class SearchTree:
             seen.add(node_id)
             reward = node.metrics.val_primary if node.metrics is not None else 0.0
             history.append(max(history[-1], reward))
-            for ancestor in self.get_lineage_chain(node_id):
-                expected_visits[ancestor.node_id] += 1
-                expected_values[ancestor.node_id] += reward
+            if node.metrics is not None or self.selection is None:
+                for ancestor in self.get_lineage_chain(node_id):
+                    expected_visits[ancestor.node_id] += 1
+                    expected_values[ancestor.node_id] += reward
         if len(self.nodes) - 1 > self.config.max_iterations or self.best_history != history:
             raise ValueError("Invalid iteration or score history")
         for node in self.nodes.values():
             _finite(node.value_sum, "value_sum")
             if node.visit_count != expected_visits[node.node_id] or not math.isclose(node.value_sum, expected_values[node.node_id], abs_tol=1e-12, rel_tol=0):
                 raise ValueError("Search statistics disagree with completion history")
+        if self.config.strategy == "best_first":
+            self._validate_selection()
+        elif self.selection is not None:
+            raise ValueError("UCT cannot contain best-first state")
+
+    def _validate_selection(self):
+        """Replay completed allocations so corrupted detour budgets fail closed."""
+        if self.selection is None:
+            raise ValueError("Missing best-first state")
+        self.selection.__post_init__()
+        replay = BestFirstState(self.root_id)
+        available = {self.root_id: self.nodes[self.root_id]}
+        active = [n.node_id for n in self.nodes.values()
+                  if n.status in (NodeStatus.PENDING, NodeStatus.RUNNING)]
+        for node_id in self.completed_ids + active:
+            node = self.nodes[node_id]
+            if node.status == NodeStatus.PRUNED:
+                raise ValueError("Best-first does not prune evaluated models")
+            parent, reason = replay.choice(available, self.config)
+            if parent is None or parent.node_id != node.parent_id:
+                raise ValueError("Selection history disagrees with best-first policy")
+            replay.reserve(node.parent_id, reason, self.config)
+            if node_id in active:
+                break
+            replay.complete(node, available)
+            available[node_id] = node
+        if self.selection is None or asdict(replay) != asdict(self.selection):
+            raise ValueError("Best-first state disagrees with completion history")

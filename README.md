@@ -25,7 +25,7 @@ The project defines its primary validation objective as:
 | Reference model | Fixed FM baseline |
 | Search budget | At most 50 candidate iterations |
 | Wall-clock budget | At most 6 hours per end-to-end run |
-| Convergence parameters | Improvement threshold ε = 0.002; patience N = 3 |
+| Default search policy | Best-first; after 5 evaluated non-improvements, one detour of up to 2 attempts |
 | Human intervention | None after configuration and launch |
 
 The dataset release, label derivation, impression grouping, split boundaries, GAUC weighting, and nDCG eligibility rules must be fixed before experiments begin. The score above is the project's specified objective; equivalence to an official benchmark protocol remains to be verified.
@@ -35,7 +35,7 @@ The dataset release, label derivation, impression grouping, split boundaries, GA
 ```mermaid
 flowchart TD
     A[Validate configuration and freeze data splits] --> B[Train and evaluate FM genesis node]
-    B --> C{Budget available and not converged?}
+    B --> C{Budget available and search may continue?}
     C -->|Yes| D[Select parent using UCT / best-first policy]
     D --> E[Propose one atomic hypothesis]
     E --> F[Create isolated Git workspace]
@@ -43,7 +43,7 @@ flowchart TD
     G -->|Execution error| H{Repair budget available?}
     H -->|Yes| I[Apply bounded repair]
     I --> G
-    H -->|No| J[Record failure outside candidate graph]
+    H -->|No| J[Record failed attempt without changing model scores]
     G -->|Valid evaluation| K[Commit candidate and update graph]
     J --> C
     K --> C
@@ -59,9 +59,58 @@ The tree registry retains pending, running, successful, failed, and pruned attem
 
 ### Parent selection and pruning
 
-The implemented **Upper Confidence Bound for Trees (UCT)** policy uses backed-up mean validation Primary plus `c * sqrt(log(parent_visits) / visits)`, with `c = sqrt(2)` by default. Each completed attempt backs up its absolute Primary along its lineage; failures back up zero. Genesis starts with zero visits and is excluded from the iteration budget. The implementation uses a single-parent tree and permits one active attempt at a time.
+New runs default to **best-first with bounded detours** (`strategy="best_first"`).
+The tree records ancestry, while parent selection considers a flat pool of
+evaluated models. Usually select the model with the highest own validation
+Primary; promote any strictly higher score immediately and retain the incumbent
+on ties. There is no child cap, forced expansion, or subtree pruning. Lower
+scores remain in the archive, and failed implementations do not lower parent
+scores or add zero-reward visits.
 
-Selection expands a successful node until its child-attempt limit is reached (default three, including failures), then descends by UCT. Exhausted subtrees are skipped to backtrack. A successful candidate whose Primary drops by more than 0.01 relative to its parent is pruned; a failed candidate remains failed without pruning its parent. Pruning preserves history, and final best-pipeline selection includes evaluated pruned nodes. These settings are persisted in the tree checkpoint.
+After `stagnation_patience=5` successfully evaluated candidates without a new
+global best, start a detour. Prefer the highest-scoring alternative outside the
+incumbent's ancestor/descendant chain; if none exists, use the highest-scoring
+distinct checkpoint elsewhere in the archive. Equal scores retain insertion
+order; identical incumbent commit hashes are excluded. Ancestry is a cheap
+diversity proxy, **not an architecture classifier**. The detour has at most
+`detour_attempts=2` attempts, including failed implementations. Its next attempt
+builds on its latest valid candidate even if that candidate is worse than its
+parent or the global best; a failed attempt leaves the detour parent unchanged.
+A global improvement ends the detour immediately and returns to best-first.
+
+An unsuccessful detour stops search with `stop_reason="stagnation"` for review;
+it does not automatically restart. At most `max_detours=1` detour may start per
+run by default, including successful detours. If that allowance is used, the
+next best-first stagnation also stops. `max_detours=0` disables detours. No valid
+alternative means stop rather than fabricate another model. Hard iteration,
+model-call and time limits may cut a detour short. The five-evaluation window
+ignores implementation failures, but all attempts still consume the hard budgets.
+These limits are spending guards, not evidence of mathematical convergence.
+
+Search stopping uses the existing finalization flow: freeze the best model,
+attempt final test inference within the reserved budget, and write the report.
+It does not authorize another run. Any higher validation score counts as a
+selection improvement; this is not a statistical-significance claim.
+
+**Legacy UCT** remains available with `strategy="uct"`. It uses backed-up mean
+Primary plus `c * sqrt(log(parent_visits) / visits)`, default `c=sqrt(2)`, and
+counts failures as zero-reward visits. It fills three child-attempt slots before
+descending, prunes parent-relative drops greater than 0.01, and retains its old
+convergence rule. `exploration_weight`, `max_children`, `prune_delta`, `patience`,
+and `improvement_threshold` affect UCT only. Genesis remains outside the candidate
+budget, and both policies permit one active attempt.
+
+Version-2 tree checkpoints persist and validate detour state by replaying
+allocation history. Version-1 checkpoints and saved run configs without a
+strategy load as UCT; resuming never silently changes the policy. Use a fresh
+run to change strategy. The original implementation is also preserved on local
+branch `codex/uct-search-preserved` at `fff7aac`.
+
+`selection.chosen` events and `report.json`'s `selection_decisions` explain each
+parent choice. The same allocation context is supplied to the proposal model.
+Run the allocation tests without model calls using
+`python -B scripts/test_best_first.py`; `python -B scripts/test_tree.py` checks
+legacy UCT compatibility.
 
 ### Git isolation and persistent memory
 
@@ -180,11 +229,11 @@ Each experiment should test one explicit hypothesis within a subsystem. Auxiliar
 1. **Freeze the benchmark.** Record the dataset version, split manifest, preprocessing rules, target definition, ranking groups, metric implementation, seeds, and hardware. Keep test data out of search decisions.
 2. **Establish the reference.** Train and evaluate the fixed FM pipeline to create the genesis node. All candidates use the same evaluation protocol.
 3. **Search on validation data.** Log both component metrics, Primary, the improvement over FM, execution status, and elapsed time for every evaluated candidate.
-4. **Enforce all limits.** Stop when the iteration cap, wall-clock deadline, or convergence condition is reached, whichever comes first. Failed candidates count toward the iteration cap; repairs stay within their candidate's iteration and have a separate retry bound.
+4. **Enforce all limits.** Stop when a hard budget or the policy's stopping condition is reached. Failed candidates count toward the iteration cap; repairs stay within their candidate's iteration and have a separate retry bound.
 5. **Select and freeze.** Choose the best valid pipeline by validation Primary before accessing the test set. If no candidate improves on FM, retain the reference pipeline.
 6. **Run final inference.** Export test predictions and, where labels are available, final test metrics without using them for further tuning.
 
-**Implemented convergence interpretation:** compare best-so-far validation Primary now with its value three completed candidate iterations earlier. Stop if the total improvement across that window is at most 0.002; continuing requires strictly more than 0.002. Failed attempts count as iterations with no improvement. The comparison uses an absolute tolerance of 1e-12 at the threshold. Iteration and elapsed-time limits are independent stop conditions.
+**Legacy UCT convergence only:** compare best-so-far validation Primary now with its value three completed candidate iterations earlier. Stop if the total improvement across that window is at most 0.002; continuing requires strictly more than 0.002. Failed attempts count as iterations with no improvement. The comparison uses an absolute tolerance of 1e-12 at the threshold. Best-first instead uses the stagnation/detour rules above. Hard budgets apply independently to both policies.
 
 The six-hour budget covers initialization, baseline training, search, repairs, and final inference. The scheduler must reserve time for final inference and artifact export, and enforce timeouts on running jobs rather than checking the deadline only between experiments. If the run cannot complete, it must report that limitation explicitly.
 
@@ -312,16 +361,18 @@ Directory -Force storage`), and save this JSON as `storage/run-3.json`:
 ```json
 {
   "search": {
+    "strategy": "best_first",
     "max_iterations": 3,
     "max_wall_clock_s": 3600,
-    "patience": 3,
-    "max_children": 3
+    "stagnation_patience": 5,
+    "detour_attempts": 2,
+    "max_detours": 1
   },
   "candidate_timeout_s": 1800,
   "final_reserve_s": 180,
   "max_repairs": 3,
   "proposal_attempts": 2,
-  "mutation_attempts": 2,
+  "mutation_attempts": 4,
   "proposal_tokens": 16384,
   "mutation_tokens": 8192,
   "max_llm_calls": 24,
@@ -335,7 +386,7 @@ Then start a fresh run:
 .\.venv\Scripts\python.exe -B main.py --run-dir storage/sample-3-001 --data-dir data/kuairand-pure/KuaiRand-Pure/data --config storage/run-3.json
 ```
 
-This is the same configuration used for the current paid three-iteration sample.
+This example uses the current best-first default; historical paid samples used UCT.
 It evaluates genesis, attempts three candidates, and evaluates the selected
 pipeline on the final test split. Safety limits can stop it early; failed
 candidate attempts still count. The larger proposal cap leaves room for high
@@ -372,10 +423,12 @@ old run. A populated directory is rejected for a new run. The orchestrator owns
 its candidate workspace and may discard uncommitted edits there when restoring
 stages; do not edit it during execution.
 
-For a 50-iteration run, copy the sample config and set `max_iterations` and
-`patience` to 50, `max_wall_clock_s` to 21600, and `max_llm_calls` to 400. Keep
+For a run with a 50-attempt ceiling, copy the sample config and set `max_iterations`
+to 50, `max_wall_clock_s` to 21600, and `max_llm_calls` to 400. Keep
 other settings as appropriate and choose another fresh run directory. These are
 safety ceilings, not a guarantee that all 50 attempts will finish.
+Best-first may stop much earlier after an unsuccessful detour; raising the
+iteration ceiling does not raise the detour allowance.
 
 Exit codes: `0` means final test evaluation succeeded (not necessarily a better
 model); `1` means an exception stopped the run; `2` means the run finalized but

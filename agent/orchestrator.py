@@ -239,12 +239,15 @@ class Orchestrator:
         with store.lock():
             state, tree, memory = store.load()
             raw = dict(state["config"])
-            raw["search"] = SearchConfig(**raw["search"])
+            raw["search"] = SearchConfig.from_saved(raw["search"])
             config = RunConfig(**raw)
+            if tree is not None and tree.config != config.search:
+                raise ValueError("Run and tree search configurations disagree")
             if Path(config.run_dir) != store.directory:
                 raise ValueError("Run directory differs from the saved location")
             obj = cls(config, client=client, runner=runner, splits=splits)
             obj.state, obj.tree, obj.memory = state, tree, memory
+            obj.state["config"] = asdict(config)
             obj._bind()
             if state["stage"] != "done" and obj._fingerprint() != state["protocol_id"]:
                 raise ValueError("Dataset or evaluation protocol changed; refusing to resume")
@@ -370,14 +373,18 @@ class Orchestrator:
             self._stage("final_prepare")
             return
         node_id = f"node_{len(self.tree.nodes):03d}"
+        selection = self.tree.selection_status()
         node = SearchNode(node_id, parent_id=parent.node_id, depth=parent.depth + 1,
                           incoming_edge=EdgeAction("unproposed", "Proposal not produced"),
                           git_branch=f"codex/{node_id}")
         self.tree.add_node(node)
+        self.state.setdefault("selection_decisions", {})[node_id] = selection
         self.state.update(active=node_id, attempts={"proposal": 0, "mutation": 0},
                           diagnostic="", execution=None, files=None, repair_pending=False,
                           candidate_started=time.time(), candidate_elapsed=0.0)
         self._stage("propose")
+        self.logger.emit("selection.chosen", component="orchestrator", run_id=self.state["run_id"],
+                        node_id=node_id, parent_id=parent.node_id, **selection)
 
     def _node(self):
         return self.tree.nodes[self.state["active"]]
@@ -413,6 +420,7 @@ class Orchestrator:
                     for n in (self.tree.nodes[i] for i in self._parent().children_ids)
                     if n.node_id != self.state["active"]]
         context = json.dumps({"selected_parent_id": self._parent().node_id,
+                              "selection": self.state.get("selection_decisions", {}).get(self.state["active"]),
                               "siblings": siblings, "remaining_seconds": self.budget.remaining(),
                               "memory": self.memory.prompt_summary(self._context(),
                                   parent_commit_sha=self._parent().git_commit_sha,
@@ -631,5 +639,8 @@ class Orchestrator:
                       elapsed_s=time.time() - self.state["started_at"], config=asdict(self.config),
                       llm_calls=self.state["llm_calls"], reported_tokens=self.state["reported_tokens"],
                       responses_without_usage=self.state["responses_without_usage"])
+        report["selection_decisions"] = self.state.get("selection_decisions", {})
+        if self.tree is not None:
+            report["search_selection"] = self.tree.selection_status()
         write_report(report, self.directory / "report.json")
         self._stage("done")
