@@ -1,8 +1,11 @@
 """Offline checks for stage routing and isolated provider credentials."""
 import os
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.budget import BudgetClient
 from agent.llm.client import LLMClient, LLMConfig
 

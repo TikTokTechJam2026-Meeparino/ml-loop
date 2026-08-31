@@ -1,0 +1,5 @@
+# The workspace template is the source the model reads and rewrites with exact
+# SEARCH/REPLACE blocks. core.autocrlf=true would check these out as CRLF while
+# the model emits LF, so every edit is rejected as a line-ending mismatch.
+# Pin them to LF regardless of the user's autocrlf setting.
+workspace_template/** text eol=lf

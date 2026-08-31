@@ -1,10 +1,12 @@
 """Offline coverage for diagnostic completeness and credential redaction."""
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.log import RunLogger
 from agent.llm.client import LLMClient, LLMConfig, LLMError
 from agent.diagnostics import exception_details, sanitize
