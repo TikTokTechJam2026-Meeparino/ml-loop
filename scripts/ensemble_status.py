@@ -43,7 +43,10 @@ def show(run_dir):
     nodes = raw if isinstance(raw, list) else list(raw.values())
     report = run_dir / "report.json"
     seconds = elapsed(run_dir)
-    state = "done" if report.exists() else "running"
+    paused = json.loads((run_dir / "snapshots" / generation / "state.json")
+                        .read_text(encoding="utf-8")).get("paused_error")
+    state = ("done" if report.exists() else
+             f"paused: {paused}" if paused else "running")
     header = f"{run_dir.name} [{state}]"
     if seconds is not None:
         header += f" {seconds / 60:.1f} min"
