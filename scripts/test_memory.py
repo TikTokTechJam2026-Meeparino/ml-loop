@@ -150,6 +150,31 @@ class MemoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ExplorationMemory.load(path)
 
+    def test_merge_absorbs_other_runs_and_rejects_conflicts(self):
+        self.record('a')
+        other = MemoryTests('test_merge_absorbs_other_runs_and_rejects_conflicts')
+        other.setUp()
+        other.context = MemoryContext('run2', 'protocol1', 'features', {'shape': [5, 16]})
+        other.record('a', 0.4)
+        other.record('b', None, stderr='ValueError: shape mismatch')
+        self.assertEqual(self.memory.merge(other.memory), 2)
+        # Same node_id under a different run_id is distinct evidence, not a clash.
+        self.assertEqual(len(self.memory.insights), 3)
+        self.assertEqual(self.memory.merge(other.memory), 0)
+        summary = self.memory.prompt_summary(self.context, nodes={}, selected_parent_id='root')
+        self.assertIn('relationship=other_run', summary)
+        self.assertIn('run2/root -> a', summary)
+        clash = ExplorationMemory()
+        clash._insert(self.memory.insights[0])
+        conflicting = MemoryTests('test_merge_absorbs_other_runs_and_rejects_conflicts')
+        conflicting.setUp()
+        conflicting.record('a', 0.7)
+        with self.assertRaises(ValueError):
+            clash.merge(conflicting.memory)
+
+    def test_merge_requires_a_memory(self):
+        with self.assertRaises(ValueError):
+            self.memory.merge([])
     def test_signature_preserves_api_and_shape(self):
         self.assertEqual(error_signature('trace\nAttributeError: torch.missing\ncleanup done'), 'AttributeError: torch.missing')
         self.assertNotEqual(error_signature('RuntimeError: shape 512'), error_signature('RuntimeError: shape 1024'))

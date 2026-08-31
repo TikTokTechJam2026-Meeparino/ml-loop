@@ -259,7 +259,7 @@ Search state, failure caches, and cross-branch insights persist outside candidat
 
 `ExplorationMemory` in `agent/graph/memory.py` records terminal outcomes through `record(node, parent, context, stderr=..., reflection=...)`. Supply a `MemoryContext` with run ID, evaluation protocol ID, subsystem, and relevant configuration/shapes/seeds. Numeric gains and losses are relative to the parent; neutral results are retained, and pruning status does not determine whether an experiment improved. Terminal failures require an error signature and the final ten stderr lines. All terminal outcomes can carry optional reflections under 20 words, labelled as model interpretations without replacing numeric or error evidence. Memory never calls an LLM or applies reflection thresholds. The orchestrator gates reflection on significant parent-relative gains/losses or terminal failures, subject to remaining budgets; pruning alone is not a trigger. Routine iterations need only numeric summaries. Diagnostic text is bounded and redacted before it is supplied to memory or an LLM.
 
-`prompt_summary(context)` selects up to six contextual insights with a 2,400-character cap, excludes other evaluation protocols, and deduplicates equivalent observations for the prompt without deleting evidence. Pass `max_tokens` and the target model's `token_counter` for a token cap on the complete summary. `save()` and `load()` use versioned `storage/global_insights.json` with atomic replacement and validation. Prompt assembly and recording remain explicit orchestrator responsibilities; they are not automatically wired into the mutation engine. Run offline checks with `python scripts/test_memory.py`.
+`prompt_summary(context)` selects up to six contextual insights with a 2,400-character cap, excludes other evaluation protocols, and deduplicates equivalent observations for the prompt without deleting evidence. Pass `max_tokens` and the target model's `token_counter` for a token cap on the complete summary. `save()` and `load()` use versioned `storage/global_insights.json` with atomic replacement and validation. Prompt assembly and recording remain explicit orchestrator responsibilities; they are not automatically wired into the mutation engine. Set `global_memory_path` in the run config to share one archive across runs: a run is seeded from it at construction and merges its own evidence back when it reports, recording the inherited and added counts under `global_memory` in `report.json`. Retrieval filters on the evaluation protocol fingerprint, so evidence recorded against different data or a different protocol is inert rather than misleading, and `prompt_summary` marks records from other runs `relationship=other_run` with their source lineage explicitly unavailable. A corrupt archive stops a run before it starts rather than letting it search blind; a failed archive write is reported and never discards the completed run. Leaving `global_memory_path` unset keeps a run isolated, which is the default. Run offline checks with `python scripts/test_memory.py`.
 
 ### Post-evaluation reflection
 
@@ -689,6 +689,63 @@ calls (11,851 reported tokens). Gemini proposed `k=8` and `l2=1e-4`; mutation an
 training succeeded without repairs. Candidate validation Primary was 0.599926
 versus genesis 0.601469, so genesis was retained. Final test Primary was 0.595341.
 This verifies the live integration, not an improvement or a full-budget search.
+
+### Sequential runs over a shared archive
+
+A single search stops on stagnation well inside its ceilings: the reference
+50-iteration run finalized after 13 candidates, using 36 of 400 model calls and
+0.71 of six hours. Independent runs therefore spend budget one run leaves idle
+rather than dividing a scarce pool, and they draw different architectures from
+identical starting conditions. Their cost is repetition: the same pairwise-BPR
+candidate was proposed at `node_002` in three separate runs.
+
+`scripts/run_ensemble.py` runs several searches back to back over one
+`global_memory_path`, so each keeps its own tree, incumbent and genesis baseline
+while inheriting what the earlier ones measured:
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts/run_ensemble.py --base-dir storage/ensemble-001 --data-dir data/kuairand-pure/KuaiRand-Pure/data --config storage/run-ensemble.json --runs 4
+```
+
+Save this JSON as `storage/run-ensemble.json`; like the other run configs it stays
+local and is not tracked:
+
+```json
+{
+  "search": {
+    "strategy": "best_first",
+    "max_iterations": 50,
+    "max_wall_clock_s": 5400,
+    "stagnation_patience": 5,
+    "detour_attempts": 5,
+    "max_detours": 1
+  },
+  "candidate_timeout_s": 1800,
+  "final_reserve_s": 180,
+  "max_repairs": 3,
+  "proposal_attempts": 2,
+  "mutation_attempts": 4,
+  "proposal_tokens": 16384,
+  "mutation_tokens": 8192,
+  "max_llm_calls": 400,
+  "reflection_enabled": true,
+  "global_memory_path": "storage/global_insights.json"
+}
+```
+
+`storage/run-ensemble.json` shortens the per-run wall clock to 5,400 seconds and
+raises `detour_attempts` to 5. `detour_attempts` is the setting that lengthens a
+stagnating search: `max_detours` caps how many detours may start, but a run sets
+`review_required` and stops as soon as one detour spends all its attempts without
+promoting, so a second detour is unreachable at the default `detour_attempts`.
+
+Runs are sequential by necessity, since the archive is written when a run reports
+and read when the next is constructed; parallel runs would not see each other. A
+failing run is reported and skipped rather than ending the sequence, and a
+populated run directory is skipped rather than resumed, so resume a specific run
+through `main.py --resume`. The driver writes `ensemble.json` into the base
+directory and ranks runs by validation Primary only; test scores are reported,
+never optimised against.
 
 ### Prompting an AI coding agent to run a search
 

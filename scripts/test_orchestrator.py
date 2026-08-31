@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent.graph.memory import ExplorationMemory
 from agent.graph.node import MetricResult
 from agent.graph.tree import SearchConfig
 from agent.llm.client import LLMError, LLMResponse, TokenUsage
@@ -499,6 +500,52 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("dim=32", prompt)
         self.assertIn("0.6", prompt)
 
+    def test_shared_archive_seeds_the_next_run_as_foreign_evidence(self):
+        archive = Path(self.temp.name) / 'insights.json'
+        self.config = replace(self.config, global_memory_path=str(archive))
+        first, _, _ = self.run_with([PROPOSAL, edit('dim=16', 'dim=32')], [.5, .6, .55])
+        report = first.run()
+        self.assertEqual(report['global_memory'], {'path': str(archive), 'recorded': 1,
+                                                   'inherited': 0, 'added': 1, 'total': 1})
+        self.run_dir = Path(self.temp.name) / 'run2'
+        self.config = replace(self.config, run_dir=str(self.run_dir))
+        second, client, _ = self.run_with([PROPOSAL, edit('dim=16', 'dim=24')], [.5, .58, .57])
+        later = second.run()
+        # The next run sees the earlier evidence, told plainly that its lineage
+        # belongs to another tree and cannot be reused.
+        prompt = client.requests[0].messages[1]['content']
+        self.assertIn('relationship=other_run', prompt)
+        self.assertIn(report['run_id'], prompt)
+        self.assertEqual(later['global_memory']['inherited'], 1)
+        self.assertEqual(later['global_memory']['total'], 2)
+        self.assertEqual(len(ExplorationMemory.load(archive).insights), 2)
+
+    def test_archive_is_opt_in_and_absent_by_default(self):
+        self.assertIsNone(RunConfig(str(self.run_dir)).global_memory_path)
+        obj, _, _ = self.run_with([PROPOSAL, edit('dim=16', 'dim=32')], [.5, .6, .55])
+        self.assertIsNone(obj.run()['global_memory'])
+
+    def test_corrupt_archive_fails_before_running_blind(self):
+        archive = Path(self.temp.name) / 'insights.json'
+        archive.write_text('{ not json')
+        self.config = replace(self.config, global_memory_path=str(archive))
+        with self.assertRaises(json.JSONDecodeError):
+            self.run_with([], [])
+
+    def test_archive_write_failure_does_not_discard_the_run(self):
+        archive = Path(self.temp.name) / 'insights.json'
+        self.config = replace(self.config, global_memory_path=str(archive))
+        obj, _, _ = self.run_with([PROPOSAL, edit('dim=16', 'dim=32')], [.5, .6, .55])
+        original = ExplorationMemory.save
+        def refuse(memory, path='storage/global_insights.json'):
+            if Path(path) == archive:  # Leave generation checkpoints working.
+                raise OSError('disk full')
+            return original(memory, path)
+        with patch.object(ExplorationMemory, 'save', refuse):
+            report = obj.run()
+        self.assertEqual(report['selected_node_id'], 'node_001')
+        self.assertIn('disk full', report['global_memory']['error'])
+        self.assertFalse(archive.exists())
     def test_checkpoint_drift_prevents_test_inference(self):
         obj, client, runner = self.run_with([PROPOSAL, "NO_CHANGES"], [.5])
         original = obj._final_execute

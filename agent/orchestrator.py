@@ -55,6 +55,11 @@ class RunConfig:
     template_dir: str = str(ROOT / "workspace_template")
     environment_dir: str = str(ROOT / "storage" / "environments")
     wheelhouse: str | None = None
+    # Optional archive shared across runs. When set, a run starts seeded with
+    # evidence from earlier runs and writes its own back, so independent trees
+    # stop re-deriving dead ends already measured. Retrieval filters on the
+    # protocol fingerprint, making evidence from other data or protocols inert.
+    global_memory_path: str | None = None
     search: SearchConfig = field(default_factory=SearchConfig)
     candidate_timeout_s: float = 1800
     final_reserve_s: float = 120
@@ -77,7 +82,8 @@ class RunConfig:
     collapse_delta: float = -.001
 
     def __post_init__(self):
-        for name in ("run_dir", "template_dir", "environment_dir", "data_dir", "wheelhouse"):
+        for name in ("run_dir", "template_dir", "environment_dir", "data_dir", "wheelhouse",
+                     "global_memory_path"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, str(Path(value).resolve()))
@@ -131,9 +137,20 @@ class Orchestrator:
         self.raw_client = client
         self.splits = splits
         self.tree = None
-        self.memory = ExplorationMemory()
+        self.memory = self._seed_memory()
         self.state = None
         self.logger = RunLogger(self.directory / "events.jsonl")
+
+    def _seed_memory(self):
+        """Start from the shared archive when one is configured and present.
+
+        A missing archive is the ordinary first-run case, not an error. Resume
+        replaces this with the run's own snapshot, which already holds the seed.
+        """
+        path = self.config.global_memory_path
+        if path is None or not Path(path).exists():
+            return ExplorationMemory()
+        return ExplorationMemory.load(path)
 
     def _fingerprint(self):
         protocol = _hash_files([STARTER / "data.py", STARTER / "evaluate.py",
@@ -670,6 +687,30 @@ class Orchestrator:
             self.state["artifacts"][selected.node_id]["final_test"] = result.artifact_dir
         self._stage("report")
 
+    def _publish_memory(self):
+        """Merge this run's evidence into the shared archive, if one is configured.
+
+        The archive is re-read before merging so a concurrent run's records are
+        not overwritten. Archive problems are reported, never raised: this run's
+        results are already complete and must not be lost to a cache write.
+        """
+        path = self.config.global_memory_path
+        if path is None:
+            return None
+        own = self.memory.insights
+        summary = {"path": path, "recorded": len(own),
+                   "inherited": sum(1 for i in own
+                                    if i.context.run_id != self.state["run_id"])}
+        try:
+            archive = (ExplorationMemory.load(path) if Path(path).exists()
+                       else ExplorationMemory())
+            summary["added"] = archive.merge(self.memory)
+            archive.save(path)
+            summary["total"] = len(archive.insights)
+        except Exception as exc:
+            summary["error"] = self._redact(f"{type(exc).__name__}: {exc}")
+        return summary
+
     def _report(self):
         if self.tree is None:
             report = dict(schema_version=1, stop_reason=self.state["stop_reason"],
@@ -684,6 +725,7 @@ class Orchestrator:
                       llm_calls=self.state["llm_calls"], reported_tokens=self.state["reported_tokens"],
                       responses_without_usage=self.state["responses_without_usage"])
         report["selection_decisions"] = self.state.get("selection_decisions", {})
+        report["global_memory"] = self._publish_memory()
         if self.tree is not None:
             report["search_selection"] = self.tree.selection_status()
         write_report(report, self.directory / "report.json")

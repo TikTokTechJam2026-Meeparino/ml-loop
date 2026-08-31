@@ -320,6 +320,22 @@ class ExplorationMemory:
                 count += 1
         return summary if count else ""
 
+    def merge(self, other: "ExplorationMemory") -> int:
+        """Absorb another pool's evidence and report how many records were new.
+
+        Identical recordings are idempotent. Conflicting evidence for one
+        (run_id, node_id) is rejected, so a shared archive cannot be silently
+        rewritten by a run that observed something different under that key.
+        """
+        if not isinstance(other, ExplorationMemory):
+            raise ValueError("Expected ExplorationMemory")
+        added = 0
+        for insight in other.insights:
+            if (insight.context.run_id, insight.node_id) not in self._insights:
+                added += 1
+            self._insert(insight)
+        return added
+
     def save(self, path: str | Path = "storage/global_insights.json") -> None:
         """Atomically save evidence, including unsuccessful experiments."""
         encoded = json.dumps({"version": 1, "insights": [asdict(i) for i in self._insights.values()]},
