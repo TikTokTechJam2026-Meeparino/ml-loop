@@ -548,24 +548,23 @@ This verifies the live integration, not an improvement or a full-budget search.
 
 An AI coding agent with shell and file access (for example Claude Code) can
 launch and narrate a run directly, without the operator watching
-`events.jsonl` by hand. The prompt that drove the 2026-08-31 50-iteration
-launch was:
+`events.jsonl` by hand. Example prompt:
 
 > help to run the code for 50 iterations, giving me updates every few
 > minutes, especially noting which node it is on, which node it branched
 > from, what the improvement and hypothesis were, and the score of the node
 > when it finished
 
-Given that prompt, the agent chose a run directory and config matching the
-50-iteration example above, launched `main.py` as a background process, and
-polled `current.json` / `snapshots/<generation>/tree.json` on an interval
+Given that prompt, an agent can choose a run directory and config matching
+the 50-iteration example above, launch `main.py` as a background process, and
+poll `current.json` / `snapshots/<generation>/tree.json` on an interval
 (roughly every 2-3 minutes) rather than tailing raw events, reporting each
 newly completed node's ID, `parent_id`, a short summary of
 `incoming_edge.hypothesis`, and `metrics.val_primary` (plus GAUC/nDCG@5) as
-it finished, and the running best score. It resumed the same run directory
-with `--resume` after an interrupted LLM call (for example a provider rate
-limit) rather than starting over. The same phrasing works for a resumed run
-or a shorter sample run; adjust "50 iterations" to the configured
+it finishes, and the running best score. It should resume the same run
+directory with `--resume` after an interrupted LLM call (for example a
+provider rate limit) rather than starting over. The same phrasing works for a
+resumed run or a shorter sample run; adjust "50 iterations" to the configured
 `max_iterations`.
 
 ### Train, evaluate, and recover a candidate
