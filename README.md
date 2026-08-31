@@ -2,21 +2,62 @@
 
 **Autonomous tree-search ML research for recommender systems.**
 
-Recommender Workshop is designed to explore, optimize, and evaluate deep ranking pipelines on the **KuaiRand-Pure** short-video recommendation benchmark. It treats experimentation as a directed acyclic state graph: each accepted node is a runnable, evaluated pipeline pinned to a Git commit, and each edge records an atomic, hypothesis-driven change.
+Recommender Workshop is an autonomous machine-learning research agent for the
+**KuaiRand-Pure** short-video recommendation benchmark. It proposes focused
+experiments, edits a recommendation pipeline, trains and evaluates each
+candidate, repairs implementation failures, and uses the accumulated evidence
+to decide what to try next.
 
-The goal is to automate the research loop—from feature engineering and model design to execution repair and final test inference—within a fixed experiment and time budget.
+The result is a reproducible research loop rather than a one-off code
+generation demo: every evaluated pipeline is connected to its hypothesis,
+parent model, metrics, configuration, artifacts, and Git commit.
 
-> **Status: integrated implementation.** The sequential orchestrator connects proposal, mutation, execution, repair, tree search, memory, reflection, and reporting. Offline lifecycle tests and a real-training smoke test with mocked model responses pass. A full-budget live-model search and independent verification of the starter-kit benchmark protocol remain outstanding.
+> **Project status:** the proposal, mutation, execution, repair, search, memory,
+> reflection, final-inference, submission, and reporting paths are integrated.
+> Offline lifecycle tests, real-data runner checks, and live-model searches have
+> been used to validate and improve the system. Generated run artifacts and the
+> raw dataset remain local and are not committed to this repository.
 
-## Research objective
+## Quick navigation
 
-Rank items within logged user impressions for the primary **`long_view`** target, improving over a fixed **Factorization Machine (FM)** reference baseline.
+- [How the solution addresses the problem](#how-the-solution-addresses-the-problem)
+- [Development tools](#development-tools)
+- [APIs used](#apis-used)
+- [Libraries and frameworks](#libraries-and-frameworks)
+- [Datasets and assets](#datasets-and-assets)
+- [Architecture](#architecture)
+- [Getting started](#getting-started)
 
-The project defines its primary validation objective as:
+## How the solution addresses the problem
 
-\[
+Improving a recommender system normally involves a repetitive research cycle:
+inspect results, form a hypothesis, modify code, train a model, diagnose
+failures, and choose the next experiment. Recommender Workshop automates that
+cycle while keeping the benchmark definition fixed.
+
+For each candidate, the agent:
+
+1. Selects a promising evaluated pipeline as its parent.
+2. Reviews its source, lineage, metrics, sibling attempts, and prior findings.
+3. Proposes one hypothesis-driven change.
+4. Applies and validates the source edits.
+5. Trains and scores the candidate on the validation split.
+6. Attempts bounded repairs if execution fails.
+7. Records the result and selects the next experiment.
+8. Freezes the best validation-selected pipeline before final test inference.
+
+The task is to rank videos within each user's logged impressions for the native
+binary **`long_view`** target. The reference pipeline is a Factorization Machine
+(FM), and the primary objective combines GAUC and nDCG@5:
+
+$$
 \mathrm{Primary} = \frac{\mathrm{GAUC} + \mathrm{nDCG@5}}{2}
-\]
+$$
+
+New runs use budget-aware best-first selection with bounded exploration
+detours. Successful and unsuccessful experiments both remain in the evidence
+record, but only valid evaluated pipelines can become future parents. Validation
+drives the search; test data is reserved for the final selected model.
 
 | Constraint | Target |
 | --- | --- |
@@ -28,7 +69,90 @@ The project defines its primary validation objective as:
 | Default search policy | Best-first; after 5 evaluated non-improvements, one detour of up to 2 attempts |
 | Human intervention | None after configuration and launch |
 
-The dataset release, label derivation, impression grouping, split boundaries, GAUC weighting, and nDCG eligibility rules must be fixed before experiments begin. The score above is the project's specified objective; equivalence to an official benchmark protocol remains to be verified.
+The dataset release, native label, impression grouping, chronological splits,
+GAUC weighting, and nDCG eligibility rules are fixed before search begins. The
+included submission utility aligns final predictions with the starter kit's
+row order, and its scores have been cross-checked against the supplied evaluator.
+
+## Development tools
+
+| Tool | How it is used |
+| --- | --- |
+| Python 3.10+ | Agent orchestration, model training, evaluation, and tests |
+| Visual Studio Code | Local source development and debugging |
+| PowerShell and terminal tools | Environment setup, test execution, and experiment launches |
+| Git CLI | Candidate branches, commits, diffs, and reproducible model lineage |
+| Python virtual environments | Separation of the agent runtime from candidate dependencies |
+| JSON and JSONL | Atomic checkpoints, experiment events, diagnostics, and final reports |
+
+The KuaiRand-Pure starter kit itself supports Python 3.9+, but the current
+agent setup uses Python 3.10 or newer. The repository also includes custom
+offline, integration, recovery, replay, and lifecycle test scripts.
+
+## APIs used
+
+The agent reaches language-model provider APIs through
+**[LiteLLM](https://docs.litellm.ai/docs/completion/input)**. It uses two
+independently configurable profiles:
+
+- a high-reasoning profile for selecting the next experiment;
+- a lower-cost profile for code mutation, execution repair, and reflection.
+
+No proprietary model is hard-coded. Model identifiers, API keys, optional base
+URLs, reasoning settings, timeouts, retries, and token limits are supplied
+through environment variables. This makes the implementation compatible with
+LiteLLM providers such as OpenAI, Anthropic, Google Gemini, OpenRouter, and
+local Ollama deployments. A documented live integration check used Google
+Gemini; operators may select a different supported provider for new runs.
+
+## Libraries and frameworks
+
+| Library or framework | Role |
+| --- | --- |
+| NumPy | Data loading, feature encoding, FM training, inference, and prediction validation |
+| LiteLLM | Provider-independent model requests, retry handling, and usage accounting |
+| python-dotenv | Loading local model and provider configuration from `.env` |
+| Python standard library | Subprocess isolation, JSON persistence, checkpoint serialization, hashing, timing, and filesystem operations |
+
+The reference candidate pins **NumPy 2.5.2** and intentionally does not depend
+on pandas, scikit-learn, PyTorch, TensorFlow, or Hugging Face Transformers.
+Autonomous candidates may introduce other ML libraries, but their dependencies
+must be pinned and they must preserve the fixed training and evaluation
+contracts.
+
+## Datasets and assets
+
+The project uses **KuaiRand-Pure**, a real-world short-video recommendation
+dataset distributed separately through Zenodo. The raw CSV files are not stored
+in Git.
+
+The current runner exposes these fields to candidate pipelines:
+
+- `date`
+- `user_id`
+- `video_id`
+- `author_id`
+- `tab`
+- `duration_ms`
+- `long_view` during training and evaluation only
+
+The dataset also contains auxiliary engagement signals such as clicks, likes,
+follows, comments, forwards, and watch time. These are potential inputs for
+future multi-task pipelines, not inputs to the current reference FM contract.
+
+Included benchmark assets are:
+
+- the supplied KuaiRand-Pure data loader and chronological split definitions;
+- the authoritative GAUC and nDCG@5 evaluator;
+- random, item-popularity, and Factorization Machine baselines;
+- reported baseline scores and feature-ablation results;
+- submission generation, alignment validation, and scoring tools;
+- a NumPy FM adapted into the project's resumable candidate interface.
+
+The fixed chronological periods are April 8–21, 2022 for training, April 22–28
+for validation, and April 29–May 8 for final testing. See
+[`data/kuairand-pure/starter-kit/README.md`](data/kuairand-pure/starter-kit/README.md)
+for the full benchmark contract and download instructions.
 
 ## Architecture
 
