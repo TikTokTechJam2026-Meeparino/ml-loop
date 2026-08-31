@@ -53,6 +53,20 @@ already contains pairwise training, propose a new change on top of that code.
 State briefly within the requirement what distinguishes this experiment from
 the closest supplied prior attempt, or note that no relevant attempt was supplied.
 
+Consider the full range of subsystems, not only the one recently explored:
+feature engineering (derived features, encodings, crosses), model backbone
+(FM hyperparameters such as k/lr/l2/epochs/patience, or replacing FM outright
+with FFM, DeepFM, DLRM, or an attention-based architecture), multi-task
+learning (auxiliary click/like/comment/play_time signals supporting the
+long_view head), and loss formulation (pointwise, pairwise/listwise ranking,
+or counterfactual objectives). Review the supplied lineage and siblings for
+which subsystems have already been tried repeatedly without a meaningful gain,
+and prefer a well-motivated change from a less-explored subsystem over another
+narrow variant of the same one. Do not switch subsystems merely for variety
+when the current one is still yielding clear gains, and do not propose a
+backbone replacement or auxiliary task without grounding it in the supplied
+interfaces and dataset schema.
+
 Preserve frozen data splits, target definitions, metrics, and test isolation.
 Never propose label leakage or changes to evaluation to improve the score.
 Only request edits to supplied files; the mutation engine cannot create, rename,
