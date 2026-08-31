@@ -38,8 +38,11 @@ def show(run_dir):
         print(f"{run_dir.name}: not started")
         return
     generation = json.loads(pointer.read_text(encoding="utf-8"))["generation"]
-    tree = json.loads((run_dir / "snapshots" / generation / "tree.json").read_text(encoding="utf-8"))
-    raw = tree["nodes"]
+    tree_path = run_dir / "snapshots" / generation / "tree.json"
+    # A generation published before the genesis pipeline is committed has state
+    # but no tree yet; that is a stage, not a missing file.
+    tree = json.loads(tree_path.read_text(encoding="utf-8")) if tree_path.exists() else {}
+    raw = tree.get("nodes") or []
     nodes = raw if isinstance(raw, list) else list(raw.values())
     report = run_dir / "report.json"
     seconds = elapsed(run_dir)
