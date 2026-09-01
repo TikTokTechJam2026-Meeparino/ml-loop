@@ -15,11 +15,13 @@ parent model, metrics, configuration, artifacts, and Git commit.
 > **Project status:** the proposal, mutation, execution, repair, search, memory,
 > reflection, final-inference, submission, and reporting paths are integrated.
 > Offline lifecycle tests, real-data runner checks, and live-model searches have
-> been used to validate and improve the system. Generated run artifacts and the
-> raw dataset remain local and are not committed to this repository.
+> been used to validate and improve the system. The raw dataset remains local and
+> is not committed. Run artifacts also stay local, apart from the subset published
+> under [`submission/`](submission/) as evidence for the results below.
 
 ## Quick navigation
 
+- [Results and submission](#results-and-submission)
 - [How the solution addresses the problem](#how-the-solution-addresses-the-problem)
 - [Development tools](#development-tools)
 - [APIs used](#apis-used)
@@ -27,6 +29,31 @@ parent model, metrics, configuration, artifacts, and Git commit.
 - [Datasets and assets](#datasets-and-assets)
 - [Architecture](#architecture)
 - [Getting started](#getting-started)
+
+## Results and submission
+
+On the held-out test split, against the starter kit's official FM baseline. Validation selected
+the model; test was scored once, after selection, by the kit's own scorer.
+
+| Metric | Official FM baseline | This submission | Delta |
+| --- | --- | --- | --- |
+| GAUC | 0.6610 | 0.665500 | +0.004500 |
+| nDCG@5 | 0.5282 | 0.531409 | +0.003209 |
+| **Primary** | **0.5946** | **0.598454** | **+0.003854** |
+
+The kit reports a standard deviation of 0.0008 over five seeds, so the Primary gain is 4.8
+standard deviations above the baseline. Reaching it took **22 of 50 iterations, 57 model calls,
+1,170,743 tokens, 87 minutes of wall clock, and no GPU**, with two manual interventions, both
+resumes after provider outages and neither touching a model.
+
+- **[`RESULTS.md`](RESULTS.md)** — results for both splits, full resource accounting, what
+  "converged" means here, and the limitation judges should weigh before reading the ranking.
+- **[`DEVPOST.md`](DEVPOST.md)** — the written project description.
+- **[`submission/`](submission/)** — the graded artifacts: scored test predictions, validation
+  predictions, the trained checkpoint, the selected pipeline source, per-iteration run logs with
+  every hypothesis and diff, the raw event logs, and the design report. Every file is covered by
+  `SHA256SUMS.txt`, and the directory is stored byte-exact so those checksums verify after a
+  clone on any platform.
 
 ## How the solution addresses the problem
 
