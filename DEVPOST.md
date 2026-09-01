@@ -28,6 +28,10 @@ The kit reports a standard deviation of 0.0008 across five seeds, so the Primary
 
 **What it cost to get there:**
 
+These figures cover **the full run-1 search that produced the submitted model**.
+The six-search comparison discussed below is a separate reproducibility
+analysis; its resource usage is not included in this table.
+
 | | |
 | --- | --- |
 | Iterations | 22 of 50 |
@@ -41,10 +45,17 @@ The winning pipeline reached that score through a within-user pairwise ranking o
 
 ## How we built it
 
-We built the project in Python using:
+We developed and debugged the project in **Visual Studio Code**, using
+**PowerShell**, terminal tools, Git CLI, and Python virtual environments to
+launch runs, inspect failures, and reproduce candidate environments.
+
+The implementation uses:
 
 - NumPy for data processing and model training
-- LiteLLM for provider-independent LLM access
+- Anthropic Claude Opus and Claude Sonnet for the submitted search run, routed
+  through LiteLLM's provider-normalized completion API. Opus handled
+  high-reasoning experiment proposals, while Sonnet handled code mutation,
+  repair, and reflection
 - Git for versioning and isolating experiments
 - KuaiRand-Pure and its official evaluation tools
 - JSON and JSONL for checkpoints, logs, and reports
@@ -72,6 +83,10 @@ Autonomous ML research requires more than good prompts. It also needs reliable e
 The result we did not expect concerns the selection signal itself. Across six independent searches, validation differences of the size this search routinely acts on did **not** order runs the way held-out test did: the rank correlation was 0.60 over six runs, and the run with the best validation score placed second on test. Repeating one identical change across three different search trees moved validation Primary by 0.0017 — wider than most of the gaps the search was promoting on.
 
 So the agent reliably finds roughly +0.004 test Primary over the baseline, then resolves below the precision of its own selection signal. Knowing where that floor sits turned out to matter more than any single score, and it is the reason we report these six runs as one result measured six times rather than as a leaderboard.
+
+## Team contributions
+
+Isaac Ng, Timothy Lee, and Sean Ng contributed equally to the project.
 
 ## Built With
 
