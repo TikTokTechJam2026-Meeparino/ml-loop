@@ -16,6 +16,7 @@ candidate workspace commit `52a281a3146b4b40cc5f2c9f11a8d7c22b164b9f`.
 | `checkpoint.pkl` | 71.5 MB | The trained model, byte-identical to the run's own artifact. |
 | `pipeline/` | 29 KB | The five editable pipeline files exactly as the selected model left them. |
 | `logs/` | 5.3 MB | Per-iteration run logs and raw event logs for all four runs. |
+| `Recommender Workshop.docx` | 40 KB | The design report: how the research loop works, the design decisions and the problems they solved, two worked development examples, resource and autonomy accounting, and limitations. |
 | `SHA256SUMS.txt` | — | Checksums for every file above. |
 
 ## Run and iteration logs
